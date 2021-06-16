@@ -1,0 +1,31 @@
+
+<link rel="stylesheet" href="resources/node-red-flow-tester/style.css">
+<script type="text/javascript">
+(function() {
+    function show() {
+        RED.sidebar.show("flow-tester");
+    }
+
+    RED.plugins.registerPlugin("node-red-flow-tester", {
+        onadd: function() {
+
+            var content = $("<div>").addClass("red-ui-flow-tester");
+            var toolbar = $('<div></div>');
+
+            RED.sidebar.addTab({
+                id: "flow-tester",
+                label: RED._("node-red-flow-tester/flow-tester:label.flowTesterShort"),
+                name: RED._("node-red-flow-tester/flow-tester:label.flowTester"),
+                iconClass: "fa fa-check-circle",
+                content: content,
+                toolbar: toolbar,
+                enableOnEdit: true,
+                action: "core:show-flow-tester-tab"
+            });
+
+
+            RED.actions.add("flow-tester:show-flow-tester-tab",show);
+        }
+    });
+})();
+</script>

@@ -1,0 +1,36 @@
+{
+    "name": "node-red-flow-tester",
+    "version": "0.1.0",
+    "description": "A flow testing framework for Node-RED 2.x",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/node-red/node-red-flow-tester.git"
+    },
+    "scripts": {
+        "build": "node scripts/build.js",
+        "dev": "nodemon --exec 'npm run build'  -i dist -i resources -e 'css js html'",
+        "test": "nyc mocha"
+    },
+    "keywords": [
+        "node-red",
+        "testing"
+    ],
+    "files": [
+        "dist",
+        "resources"
+    ],
+    "license": "Apache-2",
+    "node-red": {
+        "version": ">=2.0.0",
+        "plugins": {
+            "flow-tester": "dist/flow-tester.js"
+        }
+    },
+    "devDependencies": {
+        "fs-extra": "^10.0.0",
+        "html-minifier": "^4.0.0",
+        "nodemon": "^2.0.7",
+        "nyc": "^15.1.0",
+        "mocha": "^8.4.0"
+    }
+}
