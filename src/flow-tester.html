@@ -1,17 +1,897 @@
+<!--
+  Copyright JS Foundation and other contributors, http://js.foundation
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
 
 <link rel="stylesheet" href="resources/node-red-flow-tester/style.css">
+
 <script type="text/javascript">
 (function() {
+    var content = null;
+    var panels = null;
+    var treeList = null;
+    var treeRoot = null;
+
+    var suites = {};
+    var testID = 0;
+
+    var suiteCount = 0;
+    
+    var selectedTestID = undefined;
+    
     function show() {
         RED.sidebar.show("flow-tester");
     }
 
+    function resizeStack() {
+        var h = $(content).parent().height();
+        panels.resize(h);
+        var htl = $(treeList).parent().height();
+        treeList.css({
+            height: (htl -60)
+        });
+    }
+
+    function invokeAction(kind, opt) {
+        return $.ajax({
+            url: "/flow-tester/executeAction/"+ kind,
+            type: "POST",
+            contentType: "application/json",
+            data: JSON.stringify(opt)
+        });
+    }
+    
+    function executeAction(id, action, suiteNode, testCase) {
+        switch (action.kind) {
+        case "send":
+            invokeAction("send", {
+                target: action.target,
+                value: action.value
+            });
+            break;
+        case "press":
+        case "recv":
+        case "set": 
+        case "match":
+        case "wait":
+        case "function":
+        default:
+            throw new Error("unexpected kind of action: " +action.kind);
+            break;
+        }
+    }
+    
+    function initAction(id, action, suiteNode, testCase) {
+        switch (action.kind) {
+        case "send":
+            // nothing to do
+            break;
+        case "match":
+            invokeAction("matchInit", {
+                node: id,
+                value: action.value
+            });
+            break;
+        case "press":
+        case "recv":
+        case "set": 
+        case "wait":
+        case "function":
+        default:
+            throw new Error("unexpected kind of action: " +action.kind);
+            break;
+        }
+    }
+    
+    function executeTestCase(suiteNode, testCase) {
+        var actions = testCase.actions || {};
+        
+        invokeAction("init", {});
+        
+        var events = Object.keys(actions);
+        events.forEach(function (event) {
+            var eventActions = actions[event];
+            var handlerIDs = Object.keys(eventActions);
+            handlerIDs.forEach(function (id) {
+                var initActions = eventActions[id];
+                initActions.forEach(function (action) {
+                    initAction(id, action, suiteNode, testCase)
+                });
+            });
+        });
+
+        invokeAction("start", {});
+
+        var setupActions = actions.setup._global_ || [];
+        setupActions.forEach(function (action) {
+            executeAction("_global_", action, suiteNode, testCase)
+        });
+
+        invokeAction("cleanup", {});
+    }
+
+    function addTestCase(suite, newTest) {
+        var tid = newTest.id;
+        var name = newTest.name;
+        var treelist = suite.element.treeList;
+        var suiteNode = suite.node;
+        var test = {
+            element: getTestCaseLabel(tid, name, suiteNode, newTest),
+            icon: "fa fa-file-text-o",
+        };
+        treelist.addChild(test);
+        treelist.expand();
+    }
+
+    function getSuiteLabel(id, name, suiteNode) {
+        var div = $("<div/>", {
+            class: "red-ui-suite-label"
+        }).css({
+        });
+        var contentDiv = $("<div/>", {
+        }).text(name).appendTo(div);
+        var controls = $("<div/>", {
+            class: "red-ui-suite-label-control",
+        }).css({
+        }).appendTo(div);
+        var editButton = $("<button/>", {
+            class: "red-ui-button red-ui-button-small"
+        }).css({
+            "margin-left": "3px"
+        }).appendTo(controls);
+        $("<i/>", {
+            class: "fa fa-pencil"
+        }).text("edit").appendTo(editButton);
+        var addButton = $("<button/>", {
+            class: "red-ui-button red-ui-button-small"
+        }).css({
+            "margin-left": "3px"
+        }).appendTo(controls);
+        $("<i/>", {
+            class: "fa fa-plus"
+        }).text("add").appendTo(addButton);
+
+        $(addButton).on("click", function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            var suite = suites[id];
+            var suiteNode = suite.node;
+            var tests = suiteNode.tests;
+            var name = "New Test " +testID;
+            var tid = "T" +testID;
+            testID++;
+            var newTest = {
+                id: tid,
+                name: name,
+                suite: id,
+                actions: {
+                    // test specific events
+                    setup: {},
+                    cleanup: {},
+                    // node specific events
+                    recv: {},
+                    stub: {},
+                    send: {},
+                }, 
+            };
+            tests.push(newTest);
+            addTestCase(suite, newTest);
+        });
+        $(editButton).on("click", function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            RED.editor.edit(suiteNode);
+        });
+        return div;
+    }
+
+    function getTestCaseLabel(id, name, suiteNode, testCase) {
+        var div = $("<div/>", {
+            class: "red-ui-suite-label"
+        }).css({
+        });
+        var contentDiv = $("<div/>", {
+        }).text(name).appendTo(div);
+        var controls = $("<div/>", {
+            class: "red-ui-suite-label-control",
+        }).css({
+        }).appendTo(div);
+        var runButton = $("<button/>", {
+            class: "red-ui-button red-ui-button-small"
+        }).css({
+            "margin-left": "3px"
+        }).appendTo(controls);
+        $("<i/>", {
+            class: "fa fa-play"
+        }).text("run").appendTo(runButton);
+        var editButton = $("<button/>", {
+            class: "red-ui-button red-ui-button-small"
+        }).css({
+            "margin-left": "3px"
+        }).appendTo(controls);
+        $("<i/>", {
+            class: "fa fa-pencil"
+        }).text("edit").appendTo(editButton);
+
+        $(runButton).on("click", function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            executeTestCase(suiteNode, testCase);
+        });
+
+        $(editButton).on("click", function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            selectedTestID = id;
+            RED.editor.edit(suiteNode);
+        });
+
+        return div;
+    }
+
+
+    function addTestSuite(root, suite) {
+        var id = suite.id;
+        var name = suite.name;
+        var element = {
+            element: getSuiteLabel(id, name, suite),
+            icon: "fa fa-briefcase",
+            children: []
+        };
+        suites[id] = {
+            id: id,
+            node: suite,
+            element: element,
+        };
+        root.treeList.addChild(element);
+        var tests = suite.tests || [];
+        tests.forEach(function (test) {
+            addTestCase(suites[id], test);
+        });
+    }
+
+
+    function removeTestSuite(root, node) {
+        var suite = suites[node.id];
+        suite.element.treeList.remove();
+    }
+    
+    function addNewTestSuite(root) {
+        var def = RED.nodes.getType("flow-test-config");
+        var name = "Test Suite " +suiteCount++;
+        var id = RED.nodes.id();
+        var testNode = {
+            id: id,
+            _def: def,
+            type: "flow-test-config",
+            users: [],
+            name: name,
+            tests: []
+        };
+        RED.nodes.add(testNode);
+        RED.nodes.dirty(true);
+    }
+    
+    function createTestSuites(testsPanel) {
+        var labelDiv = $("<div/>", {
+            class: "form-row compact"
+        }).css({
+            "margin-left": "5px"
+        }).appendTo(testsPanel);
+        $("<b/>").css({
+        }).text("Test Suites").appendTo(labelDiv);
+        treeList = $("<div/>").css({
+            width: "100%"
+        }).appendTo(testsPanel);
+        var addSuiteButton = $("<button/>", {
+            class: "red-ui-button red-ui-button-small"
+        }).css({
+            float: "right",
+            "margin-top": "5px",
+            "margin-right": "5px",
+        }).text("+ add").appendTo(testsPanel);
+        var root = {
+            label: "Test Suites",
+            expanded: true,
+            children: []
+        };
+        treeRoot = root;
+        addSuiteButton.on("click", function (ev) {
+            ev.preventDefault();
+            addNewTestSuite(root);
+        });
+
+        treeList.treeList({
+            data: [root]
+        });
+    }
+
+
+    function createEventTab(id, container, node) {
+        var div = $("<div/>", {
+            id: id
+        }).css({
+            display: "none"
+        }).appendTo(container);
+        var actionList = $("<ul/>", {
+            id: id+"-list"
+        }).appendTo(div);
+        actionList.css({
+            "min-height": "300px",
+            "min-width": "430px" 
+        }).editableList({
+            addItem: function(con, i, opt) {
+                var row0 = $("<div/>", {
+                }).css({
+                }).appendTo(con);
+                var row1 = $("<div/>", {
+                    hidden: true
+                }).css({
+                    "margin-top": "3px"
+                }).appendTo(con);
+                
+                var kind = $("<select>", {
+                    class: "action-kind"
+                }).css({
+                    width: "100px",
+                    display: "inline-block",
+                    "text-align": "center",
+                    "margin-left": "5px",
+                    "margin-bottom": "0px",
+                }).appendTo(row0);
+                var actions = [
+                    "send", "press", "recv", "set", 
+                    "match", "wait", "function"
+                ];
+                actions.forEach(function (action) {
+                    $("<option/>", {
+                    }).val(action).text(action).appendTo(kind);
+                });
+
+                var val = $("<input/>", {
+                    class: "action-value"
+                }).css({
+                    display: "inline-block",
+                    "margin-left": "8px",
+                    width: "calc(100% - 130px)"
+                }).appendTo(row0);
+                $(val).typedInput({
+                    default: "str",
+                    types: [
+                        "str", "num", "bool", "json", "bin",
+                        "re", "date", "jsonata", "env"
+                    ]
+                });
+
+                $("<label/>", {
+                }).css({
+                    display: "inline-block",
+                    "text-align": "right",
+                    width: "100px"
+                }).text("to").appendTo(row1);
+                var target = $("<select/>", {
+                    class: "action-target"
+                }).css({
+                    "margin-left": "13px"
+                }).appendTo(row1);
+
+                $(kind).on("change", function (ev) {
+                    var val = $(kind).val();
+                    if ((val === "press") ||
+                        (val === "send")) {
+                        $(row1).show();
+                        var nodes = RED.nodes.filterNodes({});
+                        $(target).empty();
+                        nodes.forEach(function (node) {
+                            var id = node.id;
+                            var name = "["+ node.id +":" +node.type +"]" +node.name;
+                            $("<option/>", {
+                            }).css({
+                            }).text(name).val(id).appendTo(target);
+                        });
+                    }
+                    else {
+                        $(row1).hide();
+                    }
+                });
+
+                $(kind).val("send");
+                if (opt) {
+                    if (opt.kind) {
+                        $(kind).val(opt.kind);
+                    }
+                    if (opt.value) {
+                        $(val).typedInput("value", opt.value);
+                    }
+                    if (opt.target) {
+                        $(target).val(opt.target);
+                    }
+                }
+                $(kind).change();
+            },
+            removable: true,
+            sortable: true,
+        });
+    }
+
+    function getSuites() {
+        return Object.values(suites);
+    }
+
+    function updateCaseSelector(caseSel, caseInput, cases) {
+        var initVal = null;
+        caseSel.empty();
+        cases.forEach(function (def) {
+            var val = def.id;
+            var name = def.name;
+            $("<option/>").val(val).text(name).appendTo(caseSel);
+            initVal = initVal || val;
+        });
+        if (initVal) {
+            caseSel.val(initVal);
+        }
+    }
+
+    function loadActions(currentCase, events, node) {
+        if (!currentCase) {
+            return;
+        }
+        var nid = "_global_";
+        if (node.type !== "flow-test-config") {
+            nid = node.id;
+        }
+        events.forEach(function (event) {
+            var actions0 = currentCase.actions || {};
+            var actions1 = actions0[event] || {};
+            var actions = actions1[nid] || [];
+            var listID = "node-test-event-tab-" +event +"-list";
+            var list = $("#"+listID);
+            list.editableList("empty");
+            actions.forEach(function (action) {
+                list.editableList("addItem", action);
+            });
+        });
+    }
+    
+    function createTestSelector(
+        node,
+        suiteSel, suiteInput,
+        suiteAddButton, suiteDelButton, suiteUpdateButton,
+        caseSel, caseInput,
+        caseAddButton, caseDelButton, caseUpdateButton,
+        initialCaseID, events) {
+        var isConfig = (node.type === "flow-test-config");
+        var suites = getSuites();
+        var testSuites = {};
+        var suiteVal = null;
+        suites.forEach(function (suite) {
+            var n = suite.node;
+            var sid = n.id;
+            var sname = n.name;
+            suiteVal = suiteVal || sid;
+            if (suiteSel) {
+                $("<option/>", {
+                }).val(sid).text(sname).appendTo(suiteSel);
+            }
+            var tests = n.tests;
+            var testCases = [];
+            testSuites[sid] = testCases;
+            tests.forEach(function (test) {
+                testCases.push(test);
+            });
+            testCases.push({
+                id: "_NEW_",
+                name: "new..."
+            });
+        });
+        if (suiteSel) {
+            $("<option/>", {
+            }).val("_NEW_").text("new...").appendTo(suiteSel);
+        }
+        var currentCases = [];
+        if (suiteSel) {
+            suiteSel.on("change", function (ev) {
+                var sid = suiteSel.val();
+                var cases = testSuites[sid] || [];
+                updateCaseSelector(caseSel, caseInput, cases);
+                currentCases = cases;
+                if (sid === "_NEW_") {
+                    suiteAddButton.show();
+                    suiteDelButton.hide();
+                    suiteUpdateButton.hide();
+                }
+                else {
+                    var suites = getSuites();
+                    var suite = suites.find(function (x) { return x.id === sid; });
+                    if (suite) {
+                        suiteInput.val(suite.name);
+                    }
+                    suiteAddButton.hide();
+                    suiteDelButton.show();
+                    suiteUpdateButton.show();
+                }
+            });
+            suiteSel.val(suiteVal);
+            suiteSel.change();
+        }
+        else {
+            var cases = testSuites[node.id] || [];
+            updateCaseSelector(caseSel, caseInput, cases);
+            currentCases = cases;
+        }
+        var isFirstCase = true;
+        caseSel.on("change", function (ev) {
+            var caseid = caseSel.val();
+            if (caseid === "_NEW_") {
+                caseAddButton.show();
+                caseDelButton.hide();
+                caseUpdateButton.hide();
+            }
+            else {
+                var currentCase = currentCases.find(function (e) { return e.id === caseid; });
+                if (currentCase) {
+                    caseInput.val(currentCase.name);
+                }
+                caseAddButton.hide();
+                caseDelButton.show();
+                caseUpdateButton.show();
+                loadActions(currentCase, events, node);
+            }
+            // update actions list
+        });
+        caseInput.on("change", function (ev) {
+            // update test case list
+        });
+        caseSel.val(initialCaseID ? initialCaseID : "_NEW_");
+        caseSel.change();
+    }
+
+
+    function buildCaseInputs(container, kind, name) {
+        var selectRow = $("<div/>", {
+            class: "form-row"
+        }).appendTo(container);
+        $("<label/>").css({
+            "margin-left": "10px",
+            width: "90px"
+        }).text(name).appendTo(selectRow);
+        var selector = $("<select/>", {
+            id: "flow-test-" +kind,
+        }).css({
+            width: "calc(55% - 130px)",
+        }).appendTo(selectRow);
+        var input = $("<input/>", {
+            placeholder: name,
+        }).css({
+            width: "calc(55% - 110px)",
+            height: "24px",
+            "margin-bottom": "9px",
+            "margin-left": "8px",
+        }).appendTo(selectRow);
+
+        var addButton = $("<button/>", {
+            class: "red-ui-button red-ui-button-small"
+        }).css({
+            "vertical-align": "top",
+            "margin-top": "3px",
+            "margin-left": "3px"
+        }).appendTo(selectRow);
+        $("<i/>", {
+            class: "fa fa-plus"
+        }).appendTo(addButton);
+
+        var delButton = $("<button/>", {
+            class: "red-ui-button red-ui-button-small"
+        }).css({
+            "vertical-align": "top",
+            "margin-top": "3px",
+            "margin-left": "3px"
+        }).appendTo(selectRow);
+        $("<i/>", {
+            class: "fa fa-minus"
+        }).appendTo(delButton);
+
+        var updateButton = $("<button/>", {
+            class: "red-ui-button red-ui-button-small"
+        }).css({
+            "vertical-align": "top",
+            "margin-top": "3px",
+            "margin-left": "3px"
+        }).appendTo(selectRow);
+        $("<i/>", {
+            class: "fa fa-refresh"
+        }).appendTo(updateButton);
+
+        return [selector, input,
+                addButton, delButton, updateButton];
+    }
+    
+    function buildFlowTestTab(container, node) {
+        var isConfig = (node.type === "flow-test-config");
+        var labelRow = $("<div/>", {
+            class: "form-row"
+        }).appendTo(container);
+        $("<div/>", {
+        }).css({
+            width: "200px"
+        }).text("Events & Actions").appendTo(labelRow);
+        var suiteSelector = null;
+        var suiteInput = null;
+        var suiteAddButton = null;
+        var suiteDelButton = null;
+        var suiteUpdateButton = null;
+        if (!isConfig) {
+            [suiteSelector, suiteInput,
+             suiteAddButton, suiteDelButton, suiteUpdateButton]
+                = buildCaseInputs(container, "suite", "Test Suite");
+        }
+        var [testSelector, testInput,
+             testAddButton, testDelButton, testUpdateButton]
+            = buildCaseInputs(container, "test", "Test Case");
+
+        var eventsContainer = $("<div/>", {
+            class: "form-row"
+        }).css({
+        }).appendTo(container);
+        var eventsTab = $("<ul/>", {
+            id: "node-test-event-tabs"
+        }).css({
+            "min-width": "600px",
+            "margin-bottom": "20px"
+        }).appendTo(eventsContainer);
+        var tabContainer = $("<div/>", {
+            id: "node-test-event-tabs-content"
+        }).css({
+            "min-height": "calc(100% - 95px)"
+        }).appendTo(container);
+        var tabs = RED.tabs.create({
+            id: "node-test-event-tabs",
+            onchange: function(tab) {
+                $("#node-test-event-tabs-content").children().hide();
+                $("#" +tab.id).show();
+                resizeActionList(tab.id);
+            }
+        });
+        var events = [];
+        if (node.type === "flow-test-config") {
+            createEventTab("node-test-event-tab-setup", tabContainer, node); 
+            createEventTab("node-test-event-tab-cleanup", tabContainer, node); 
+            tabs.addTab({
+                id: "node-test-event-tab-setup",
+                label: "setup"
+            });
+            tabs.addTab({
+                id: "node-test-event-tab-cleanup",
+                label: "cleanup"
+            });
+            tabs.activateTab("node-test-event-tab-setup");
+            events = ["setup", "cleanup"];
+        }
+        else {
+            createEventTab("node-test-event-tab-recv", tabContainer, node); 
+            createEventTab("node-test-event-tab-stub", tabContainer, node); 
+            createEventTab("node-test-event-tab-send", tabContainer, node); 
+            tabs.addTab({
+                id: "node-test-event-tab-recv",
+                label: "receive"
+            });
+            tabs.addTab({
+                id: "node-test-event-tab-stub",
+                label: "stub"
+            });
+            tabs.addTab({
+                id: "node-test-event-tab-send",
+                label: "send"
+            });
+            tabs.activateTab("node-test-event-tab-recv");
+            events = ["recv", "stub", "send"];
+        }
+
+        createTestSelector(
+            node,
+            suiteSelector, suiteInput,
+            suiteAddButton, suiteDelButton, suiteUpdateButton,
+            testSelector, testInput,
+            testAddButton, testDelButton, testUpdateButton,
+            selectedTestID, events);
+
+    }
+
+    function buildTestActions(container, node) {
+        buildFlowTestTab(container, node);
+    }
+
+    function handleNodeDialogOpen(opt) {
+        var node = opt.node;
+        if (node.type === "flow-test-config") {
+            buildTestActions($("#test-actions-container"), node);
+            return;
+        }
+        if (node._def.category === "config") {
+            return;
+        }
+        var tabs = opt.tabs;
+        var content = opt.content;
+        var flowTestTab = {
+            id: "editor-tab-flow-test",
+            label: "Flow Test",
+            name: "Flow Test",
+            content: $('<div>', {
+                class: "red-ui-tray-content"
+            }).appendTo(content).hide(),
+            iconClass: "fa fa-check-circle",
+            onchange: function() {
+            }
+        };
+        var dialogForm = $("<form/>", {
+            class: "dialog-form form-hirizontal"
+        }).appendTo(flowTestTab.content);
+
+        buildFlowTestTab(dialogForm, node);
+        tabs.addTab(flowTestTab);
+    }
+
+    function createSidebarContent(div) {
+        content = div;
+        var controlDiv = $("<div/>", {
+            class: "form-row compact"
+        }).css({
+            "margin": "20px 10px"
+        }).appendTo(div);
+        var stackContainer = $("<div/>", {
+        }).appendTo(div);
+        var testsPanel = $("<div/>", {
+            class: "form-row compact"
+        }).appendTo(stackContainer);
+        var logPanel = $("<div/>", {
+            class: "form-row compact"
+        }).appendTo(stackContainer);
+        panels = RED.panels.create({
+            container: stackContainer
+        });
+        panels.ratio(0.7);
+
+        var run = $("<button/>", {
+            class: "red-ui-button red-ui-button-small"
+        }).appendTo(controlDiv);
+        $("<i/>", {
+            class: "fa fa-play"
+        }).appendTo(run);
+        $("<label/>").css({
+            "margin-left": "5px"
+        }).text("Run Tests").appendTo(controlDiv);
+
+        createTestSuites(testsPanel);
+    }
+
+    var currentHeight = undefined;
+
+    function resizeActionList(tabID) {
+        if (currentHeight) {
+            $("#"+tabID+"-list").editableList("height", currentHeight);
+        }
+    }
+
+    function handleNodeDialogResize(opt) {
+        var node = opt.node;
+        if ((node.category === "config") &&
+            (node.type !== "flow-test-config")) {
+            return;
+        }
+        var newHeight = opt.height -200;
+        if (node.type === "flow-test-config") {
+            $("#node-test-event-tab-setup-list").editableList("height", newHeight);
+            $("#node-test-event-tab-cleanup-list").editableList("height", newHeight);
+        }
+        else {
+            $("#node-test-event-tab-recv-list").editableList("height", newHeight);
+            $("#node-test-event-tab-stub-list").editableList("height", newHeight);
+            $("#node-test-event-tab-send-list").editableList("height", newHeight);
+        }
+        currentHeight = newHeight;
+    }
+
+    function typedInputValue(item) {
+        var val = item.typedInput("value");
+        return val;
+    }
+
+    function findTest(suite, tid) {
+        var tests = suite.tests;
+        var test = tests.find(function (x) { return (x.id === tid); });
+        return test;
+    }
+
+    function saveActions(node) {
+        var isGlobal = (node.type === "flow-test-config");
+        var suite = null;
+        var events = null;
+        var nid = null;
+        if (isGlobal) {
+            events = ["setup", "cleanup"];
+            nid = "_global_";
+            suite = node;
+        }
+        else {
+            events = ["recv", "stub", "send"];
+            var sid = $("#flow-test-suite").val();
+            suite = RED.nodes.node(sid);
+            nid = node.id;
+        }
+        var tid = $("#flow-test-test").val();
+        var test = findTest(suite, tid);
+        if (!test) {
+            return;
+        }
+        var actions = test.actions;
+        events.forEach(function (event) {
+            var listID = "node-test-event-tab-" +event +"-list";
+            var list = $("#"+listID).editableList("items");
+            var acts = [];
+            list.each(function (i) {
+                var kind = $(this).find(".action-kind").val();
+                var val = typedInputValue($(this).find(".action-value"));
+                var target = $(this).find(".action-target").val();
+                acts.push({
+                    kind: kind,
+                    value: val,
+                    target: target,
+                });
+            });
+            actions[event][nid] = acts;
+        });
+        RED.nodes.dirty(suite);
+    }
+
+    function handleNodeSave(node) {
+        if (node._def.category === "config") {
+            if (node.type !== "flow-test-config") {
+                return;
+            }
+        }
+        saveActions(node);
+    }
+
+    function handleNodeAdd(node) {
+        if (node.type === "flow-test-config") {
+            addTestSuite(treeRoot, node);
+        }
+    }
+
+    function handleNodeRemove(node) {
+        if (node.type === "flow-test-config") {
+            removeTestSuite(treeRoot, node);
+        }
+    }
+
+    function handleNodeChange(node) {
+        if (node.type === "flow-test-config") {
+        }
+    }
+
+    RED.comms.subscribe("flow-test:notify", function (type, msg) {
+        RED.notify(msg);
+    });
+    
     RED.plugins.registerPlugin("node-red-flow-tester", {
         onadd: function() {
 
             var content = $("<div>").addClass("red-ui-flow-tester");
-            var toolbar = $('<div></div>');
+            var toolbar = $('<div/>');
 
+            createSidebarContent(content);
+            
             RED.sidebar.addTab({
                 id: "flow-tester",
                 label: RED._("node-red-flow-tester/flow-tester:label.flowTesterShort"),
@@ -20,12 +900,26 @@
                 content: content,
                 toolbar: toolbar,
                 enableOnEdit: true,
-                action: "core:show-flow-tester-tab"
+                action: "core:show-flow-tester-tab",
+                onchange: function () {
+                    resizeStack()
+                }
             });
 
-
-            RED.actions.add("flow-tester:show-flow-tester-tab",show);
+            RED.events.on("nodes:add", handleNodeAdd);
+            RED.events.on("nodes:remove", handleNodeRemove);
+            RED.events.on("nodes:change", handleNodeChange);
+            
+            RED.events.on("nodes:dialog-open", handleNodeDialogOpen);
+            RED.events.on("nodes:dialog-resize", handleNodeDialogResize);
+            RED.events.on("editor:save", handleNodeSave);
+            
+            RED.actions.add("flow-tester:show-flow-tester-tab", show);
         }
     });
+
+    $(window).on("resize", resizeStack);
+    $(window).on("focus", resizeStack);
+
 })();
 </script>

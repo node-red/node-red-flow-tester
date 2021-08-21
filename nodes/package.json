@@ -1,0 +1,21 @@
+{
+    "name": "node-red-flow-test",
+    "version": "0.0.1",
+    "description": "Node-RED node for Flow Test",
+    "node-red": {
+        "nodes": {
+            "flow-test-config": "flow-test-config.js"
+        }
+    },
+    "license": "Apache 2.0",
+    "keywords": [
+        "node-red"
+    ],
+    "author": {
+        "name": "Hiroyasu Nishiyama",
+        "email": "hiroyasu.nishiyama.uq@hitachi.com"
+    },
+    "dependencies": {},
+    "devDependencies": {
+    }
+}
