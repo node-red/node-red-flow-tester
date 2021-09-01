@@ -87,26 +87,35 @@ module.exports = (RED) => {
                     let promise = Promise.resolve(null);
                     switch (kind) {
                     case "init":
+                        // initialize runtime part of flow-tester plugin
                         promise = init();
                         break;
                     case "start":
+                        // waits for completion of tests
                         promise = start();
                         break;
                     case "cleanup":
+                        // cleanup runtime part of flow-tester plugin
                         promise = cleanup();
                         break;
                     case "send":
+                        // send a message to specified node
                         promise = executeSend(opt.target, opt.value);
                         break;
                     case "matchInit":
+                        // register callback for checking output messages  
                         promise = initMatch(opt.node, opt.value);
                         break;
                     case "press":
-                    case "match":
+                        // press the button of target node
                     case "recv":
-                    case "set": 
+                        // receive a message from input port
+                    case "set":
+                        // set context or environment variable
                     case "wait":
+                        // wait for specified time
                     case "function":
+                        // execute JavaScript code
                     default:
                         console.log("unexpected action kind: ", kind);
                         break;
