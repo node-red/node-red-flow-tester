@@ -21,7 +21,8 @@
         category: "config",		// category of node
         defaults: {
             name: { value: "" },
-            tests: { tests: [] },
+            tests: { value: [] },
+            currentTest: { value: null },
         },
         label: function() {
             return this.name || "flow test";

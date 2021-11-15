@@ -24,8 +24,17 @@
         "version": ">=2.0.0",
         "plugins": {
             "flow-tester": "dist/flow-tester.js"
-        }
+        },
+	"nodes": {
+            "flow-test-config": "nodes/flow-test-config.js"
+	}
     },
+    "contributors": [
+        {
+            "name": "Hiroyasu Nishiyama",
+            "email": "hiroyasu.nishiyama.uq@hitachi.com"
+	}
+    ],
     "devDependencies": {
         "fs-extra": "^10.0.0",
         "html-minifier": "^4.0.0",
