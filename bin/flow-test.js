@@ -13,7 +13,8 @@ function parseArgs(args) {
     const shortHands = {
         't': ["--target"],
         'l': ["--list"],
-        'r': ["--run"]
+        'r': ["--run"],
+        'j': ["--json"],
     };
     return nopt(knownOpts, shortHands, args, 2);
 }
@@ -31,8 +32,12 @@ async function getList(target) {
     }
 }
 
-async function doList(target) {
+async function doList(target, jsonOutput) {
     const list = await getList(target);
+    if (jsonOutput) {
+        console.log(JSON.stringify(list, undefined, "\t"));
+        return;
+    }
     let id = 0;
     list.forEach((tcase) => {
         console.log(`${tcase.name}`);
@@ -74,7 +79,7 @@ async function main(args) {
         target = opts.target;
     }
     if (opts.list) {
-        await doList(target);
+        await doList(target, opts.json);
     }
     if (opts.run) {
         const res = await doRun(target, Number(opts.run));

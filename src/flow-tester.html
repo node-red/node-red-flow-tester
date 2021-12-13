@@ -14,7 +14,7 @@
     var suites = [];
     var id2suite = {};
     var id2test = {};
-    
+
     var selectedTestID = undefined;
 
     var currentTestSuite = null;
@@ -30,6 +30,8 @@
 
     var currentExecution = Promise.resolve();
     
+    var addonList = [];
+
     var MAX_LOG = 1000;
     var logs = [];
 
@@ -108,15 +110,18 @@
             for (let node of nodes) {
                 var acts = evMap[node];
                 for (let act of acts) {
-                    if ((act.kind === "match") ||
-                        ((act.kind === "function") &&
-                         act.performCheck)) {
+                    if (act.performCheck) {
                         count++;
                     }
                 }
             }
         }
         return count;
+    }
+
+    function clearMatchResults() {
+        testResult.success = 0;
+        testResult.fail = 0;
     }
 
     /**
@@ -139,9 +144,7 @@
             currentTestCase = tid;
 
             numberOfChecks = countNumberOfChecks(actions);
-
-            testResult.success = 0;
-            testResult.fail = 0;
+            clearMatchResults();
 
             addLog("Running test: " +testCase.name);
             return invokeAction("init", {});
@@ -227,7 +230,7 @@
             timeout: TIMEOUT,
             max_actions: MAX_ACTIONS,
             actions: {
-                // test specific events
+                // common events
                 setup: {},
                 cleanup: {},
                 // node specific events
@@ -470,6 +473,17 @@
         });
     }
 
+    function findAddonAction(name) {
+        for (let addon of addonList) {
+            for (let def of addon.actions()) {
+                if (def.name === name) {
+                    return def;
+                }
+            }
+        }
+        return null;
+    }
+
     /**
      *  Check that specified node belongs to a flow 
      *  @param {Object} node - node to be checked
@@ -480,13 +494,40 @@
         return (!sf);
     }
 
+    function unselectAllAddon(opt) {
+        for (let addon of addonList) {
+            for (let def of addon.actions()) {
+                const onUnselect = def.onUnselect;
+                if (onUnselect) {
+                    onUnselect(opt);
+                }
+            }
+        }
+    }
+
+    function prepareAllAddon(opt) {
+        var actions = [];
+        for (let addon of addonList) {
+            for (let def of addon.actions()) {
+                const onAddItem = def.onAddItem;
+                if (onAddItem) {
+                    if (onAddItem(opt)) {
+                        actions.push(def);
+                    }
+                }
+            }
+        }
+        return actions;
+    }
+
     /**
      *  Create a tab for setting event information
      *  @param {string} id - ID of DOM element
      *  @param {Object} container - enclosing DOM element
      *  @param {Object} node - target node 
+     *  @param {string} event - name of event 
      */
-    function createEventTab(id, container, node) {
+    function createEventTab(id, container, node, event) {
         var div = $("<div/>", {
             id: id
         }).css({
@@ -529,17 +570,6 @@
                     "margin-left": "5px",
                     "margin-bottom": "0px",
                 }).appendTo(row0);
-                var actions =
-                    (node.type === "flow-test-config") ? [
-                        "click", "send", "wait", "function"
-                    ] : [
-                        "click", "send", "set", "match", "wait", "function"
-                    ];
-                for (let action of actions) {
-                    $("<option/>", {
-                    }).val(action).text(action).appendTo(kind);
-                }
-                $(kind).val("click");
 
                 var valSpan = $("<span/>").appendTo(row0);
                 var valField = $("<input/>", {
@@ -672,6 +702,33 @@
                     ]
                 });
 
+                var activeActions = prepareAllAddon({
+                    node: node,
+                    event: event,
+                    container: con,
+                    selectRow: row0,
+                    data: opt
+                });
+
+                var actions =
+                    (node.type === "flow-test-config") ? [
+                        "click", "send", "wait", "log", "function"
+                    ] : [
+                        "click", "send", "set", "match", "wait", "log", "function"
+                    ];
+                for (let action of actions) {
+                    $("<option/>", {
+                    }).val(action).text(action).appendTo(kind);
+                }
+                for (let def of activeActions) {
+                    const name = def.name;
+                    const label = def.label;
+                    $("<option/>", {
+                    }).val(name).text(label).appendTo(kind);
+                }
+
+                $(kind).val("click");
+
                 // node label for selection menu
                 function nodeLabel(node) {
                     const name = node.type +":" +node.id;
@@ -706,6 +763,63 @@
                     $("<option/>").text(name).val(id).appendTo(clickTarget);
                 }
 
+                $(kind).on("change", function (ev) {
+                    $(valSpan).hide();
+                    $(clickTargetSpan).hide();
+                    $(numSpan).hide();
+                    $(varSpan).hide();
+                    $(jsSpan).hide();
+
+                    $(row1).hide();
+                    $(row2).hide();
+                    $(row3).hide();
+
+                    unselectAllAddon({
+                        container: con,
+                        selectRow: row0
+                    });
+                    var val = $(kind).val();
+                    if(val === "send") {
+                        $(valSpan).show();
+                        $(row1).show();
+                    }
+                    else if (val === "click") {
+                        $(clickTargetSpan).show();
+                    }
+                    else if (val === "set") {
+                        $(varSpan).show();
+                        $(row2).show();
+                    }
+                    else if (val === "match") {
+                        $(valSpan).show();
+                    }
+                    else if (val === "wait") {
+                        $(numSpan).show();
+                    }
+                    else if (val === "log") {
+                        $(valSpan).show();
+                    }
+                    else if (val === "function") {
+                        $(jsSpan).show();
+                        $(row3).show();
+                    }
+                    else {
+                        var action = findAddonAction(val);
+                        if (action) {
+                            const onSelect = action.onSelect;
+                            if (onSelect) {
+                                onSelect({
+                                    container: con,
+                                    selectRow: row0
+                                });
+                            }
+                        }
+                        else {
+                            throw new Error("unexpected action:"+val);
+                        }
+                    }
+                });
+
                 if (opt) {
                     var act_kind = opt.kind;
                     if (act_kind) {
@@ -725,6 +839,7 @@
                             var act_target = opt.target;
                             if (act_target) {
                                 $(clickTarget).val(act_target);
+
                             }
                             break;
                         case "set":
@@ -754,6 +869,11 @@
                                 $(numField).typedInput("value", opt.wait);
                             }
                             break;
+                        case "log":
+                            if (opt.hasOwnProperty("value")) {
+                                $(valField).typedInput("value", opt.value);
+                            }
+                            break;
                         case "function":
                             if (opt.code) {
                                 $(jsField).typedInput("value", opt.code);
@@ -761,68 +881,13 @@
                             checkInJS.prop("checked", !!opt.performCheck);
                             break;
                         default:
-                            throw new Error("unexpected kind of action: " +kind);
+                            if (!findAddonAction(act_kind)) {
+                                throw new Error("unexpected kind of action: " +act_kind);
+                            }
                             break;
                         }
                     }
                 }
-
-                $(kind).on("change", function (ev) {
-                    $(row1).hide();
-                    $(row2).hide();
-                    $(row3).hide();
-
-                    var val = $(kind).val();
-                    if(val === "send") {
-                        $(valSpan).show();
-                        $(varSpan).hide();
-                        $(clickTargetSpan).hide();
-                        $(numSpan).hide();
-                        $(jsSpan).hide();
-                        $(row1).show();
-                    }
-                    else if (val === "click") {
-                        $(valSpan).hide();
-                        $(varSpan).hide();
-                        $(clickTargetSpan).show();
-                        $(numSpan).hide();
-                        $(jsSpan).hide();
-                    }
-                    else if (val === "set") {
-                        $(valSpan).hide();
-                        $(varSpan).show();
-                        $(clickTargetSpan).hide();
-                        $(numSpan).hide();
-                        $(jsSpan).hide();
-                        $(row2).show();
-                    }
-                    else if (val === "match") {
-                        $(valSpan).show();
-                        $(varSpan).hide();
-                        $(clickTargetSpan).hide();
-                        $(numSpan).hide();
-                        $(jsSpan).hide();
-                    }
-                    else if (val === "wait") {
-                        $(valSpan).hide();
-                        $(varSpan).hide();
-                        $(clickTargetSpan).hide();
-                        $(numSpan).show();
-                        $(jsSpan).hide();
-                    }
-                    else if (val === "function") {
-                        $(valSpan).hide();
-                        $(varSpan).hide();
-                        $(clickTargetSpan).hide();
-                        $(numSpan).hide();
-                        $(jsSpan).show();
-                        $(row3).show();
-                    }
-                    else {
-                        throw new Error("unexpected action:"+val);
-                    }
-                });
-
                 $(kind).change();
             },
             removable: true,
@@ -1094,10 +1159,11 @@
      *  @returns {array} array of events
      */
     function nodeEvents(node) {
-        var events = [];
+        var events = ["setup", "cleanup"];
         if (node.inputs > 0) {
             // if node has input port, recv and stub events supported
-            events = ["recv", "stub"];
+            events.push("recv");
+            events.push("stub");
         }
         if (node.outputs > 0) {
             // if node has output port, send event supported
@@ -1195,19 +1261,19 @@
             }
         });
         var events = null;
+        // common events & actions
+        createEventTab("node-test-event-tab-setup", tabContainer, node, "setup");
+        createEventTab("node-test-event-tab-cleanup", tabContainer, node, "cleanup"); 
+        tabs.addTab({
+            id: "node-test-event-tab-setup",
+            label: "setup"
+        });
+        tabs.addTab({
+            id: "node-test-event-tab-cleanup",
+            label: "cleanup"
+        });
+        tabs.activateTab("node-test-event-tab-setup");
         if (node.type === "flow-test-config") {
-            // flow events & actions
-            createEventTab("node-test-event-tab-setup", tabContainer, node);
-            createEventTab("node-test-event-tab-cleanup", tabContainer, node); 
-            tabs.addTab({
-                id: "node-test-event-tab-setup",
-                label: "setup"
-            });
-            tabs.addTab({
-                id: "node-test-event-tab-cleanup",
-                label: "cleanup"
-            });
-            tabs.activateTab("node-test-event-tab-setup");
             events = ["setup", "cleanup"];
         }
         else {
@@ -1217,20 +1283,20 @@
 
             events = nodeEvents(node);
             if (hasInput) {
-                createEventTab("node-test-event-tab-recv", tabContainer, node); 
+                createEventTab("node-test-event-tab-recv", tabContainer, node, "recv"); 
                 tabs.addTab({
                     id: "node-test-event-tab-recv",
                     label: "receive"
                 });
 
-                createEventTab("node-test-event-tab-stub", tabContainer, node); 
+                createEventTab("node-test-event-tab-stub", tabContainer, node, "stub"); 
                 tabs.addTab({
                     id: "node-test-event-tab-stub",
                     label: "stub"
                 });
             }
             if (hasOutput) {
-                createEventTab("node-test-event-tab-send", tabContainer, node); 
+                createEventTab("node-test-event-tab-send", tabContainer, node, "send"); 
                 tabs.addTab({
                     id: "node-test-event-tab-send",
                     label: "send"
@@ -1269,6 +1335,14 @@
             }, "\n" + line);
             logEditor.scrollToLine(session.getLength());
         }
+    }
+
+    function clearLog() {
+        logs = [];
+        if (logEditor) {
+            var session = logEditor.getSession();
+            session.setValue("", -1);
+        }        
     }
 
     /**
@@ -1363,9 +1437,23 @@
         }).css({
             margin: "5px",
             width: "95%",
-            height: "95%",
+            height: "calc(95% - 10px)",
             "min-height": "150px",
         }).appendTo(logPanel);
+        var logControl = $("<div/>", {
+        }).css({
+            "text-align": "right",
+            "margin-right": "20px"
+        }).appendTo(logPanel);
+        var logClearButton = $("<i/>", {
+            class: "red-ui-button red-ui-button-small"
+        }).css({
+            "margin-left": "3px"
+        }).appendTo(logControl);
+        $("<i/>", {
+            class: "fa fa-trash"
+        }).appendTo(logClearButton);
+
         panels = RED.panels.create({
             container: stackContainer
         });
@@ -1380,7 +1468,7 @@
         $("<label/>").css({
             "margin-left": "5px",
         }).text("Run Tests").appendTo(controlDiv);
-
+                      
         createTestSuites(testsPanel);
 
         runButton.on("click", function (ev) {
@@ -1396,6 +1484,14 @@
             lineNumbers: false,
             readOnly: true,
         });
+
+        logClearButton.on("click", function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            clearLog();
+        });
+
+
         setTimeout(function () {
             addLog("Starting Flow Tester");
         }, 1000);
@@ -1560,10 +1656,15 @@
                     case "match":
                         var value = typedInputValue($(this).find(".action-value"));
                         action.value = value;
+                        action.performCheck = true;
                         break;
                     case "wait":
                         var wait = $(this).find(".action-wait-ms").typedInput("value");
                         action.wait = wait;
+                        break;
+                    case "log":
+                        var value = typedInputValue($(this).find(".action-value"));
+                        action.value = value;
                         break;
                     case "function":
                         var code = $(this).find(".action-js").typedInput("value");
@@ -1572,7 +1673,17 @@
                         action.performCheck = check;
                         break;
                     default:
-                        throw new Error("unexpected kind of action: " +kind);
+                        var addon = findAddonAction(kind);
+                        if (addon) {
+                            var onSave = addon.onSave;
+                            if (onSave) {
+                                action = onSave($(this));
+                                action.kind = kind;
+                            }
+                        }
+                        else {
+                            throw new Error("unexpected kind of action: " +kind);
+                        }
                         break;
                     }
                     acts.push(action);
@@ -1639,12 +1750,18 @@
     });
     
     //  Internal API for handling overflow of actions execution count 
-    RED.comms.subscribe("flow-test:maxActions", function (type) {
+    RED.comms.subscribe("flow-test:maxActions", function (type, opt) {
         var msg = `"Exceeded max actions count: ${MAX_ACTIONS}`;
         addLog("- "+msg);
         invokeAction("cleanup").then(function () {
             workComplete();
         });
+    });
+
+    //  Clear results of match actions
+    RED.comms.subscribe("flow-test:clear-match-result", function (type, opt) {
+        numberOfChecks = countNumberOfChecks(actions);
+        clearMatchResults();
     });
 
     //  Handle results of match actions
@@ -1680,9 +1797,24 @@
         RED.view.clickNodeButton(node);
     });
 
+    function registerAddon(addon) {
+        addonList.push(addon);
+    }
+
     // Register flow testing plugin
     RED.plugins.registerPlugin("node-red-flow-tester", {
         onadd: function() {
+            var plugins = RED.plugins.getPluginsByType('flow-tester-addon');
+            plugins.forEach(function(plugin) {
+                registerAddon(plugin);
+            })
+            RED.events.on("registry:plugin-added", function (id) {
+                var plugin = RED.plugins.getPlugin(id);
+                if (plugin.type === "flow-tester-addon") {
+                    registerAddon(plugin);
+                }
+            });
+
             var content = $("<div/>").addClass("red-ui-flow-tester");
             var toolbar = $('<div/>');
 
@@ -1711,6 +1843,8 @@
             RED.events.on("editor:save", handleNodeSave);
             
             RED.actions.add("flow-tester:show-flow-tester-tab", show);
+        },
+        onremove: function() {
         }
     });
 

@@ -27,6 +27,8 @@ module.exports = (RED) => {
         send: [],		// executed on message send
     };
 
+    var addonList = [];
+
     /**
      *  Add event log to editor sidebar log area
      *  @param {string} msg - message to be added
@@ -47,7 +49,7 @@ module.exports = (RED) => {
      *  Notify that execution reached the maxnimum number
      */
     function reportMaxActions() {
-        RED.comms.publish("flow-test:notifyMaxActions");
+        RED.comms.publish("flow-test:maxActions", {});
     }
 
     /**
@@ -84,6 +86,17 @@ module.exports = (RED) => {
     function executeClick(target) {
         log(`click: ${target}`);
         RED.comms.publish("flow-test:click", target);
+        return Promise.resolve(true);
+    }
+
+    /**
+     *  Execute log action: log message
+     *  @param {string} value - logged string 
+     *  @returns {Promise}
+     */
+    function executeLog(value) {
+        log(`log: ${value}`);
+        RED.log.info(value);
         return Promise.resolve(true);
     }
 
@@ -264,6 +277,21 @@ module.exports = (RED) => {
         return vm.runInContext(script, ctx);
     }
 
+    /**
+     *  Find addon action definition 
+     *  @param {string} name - name of action
+     *  @returns {Object} action definition
+     */
+    function findAddonAction(name) {
+        for (let addon of addonList) {
+            for (let def of addon.actions()) {
+                if (def.name === name) {
+                    return def;
+                }
+            }
+        }
+        return null;
+    }
 
     /**
      *  Execute action
@@ -276,7 +304,7 @@ module.exports = (RED) => {
         actionCount++;
         if (actionCount >= maxActions) {
             reportMaxActions();
-            return Promise.resolve(true);
+            throw new Error("action count exceeded limit");
         }
         try {
             switch (action.kind) {
@@ -284,6 +312,8 @@ module.exports = (RED) => {
                 return executeSend(action.target, action.value);
             case "click":
                 return executeClick(action.target);
+            case "log":
+                return executeLog(action.value);
             case "set":
                 return executeSet(action.dst, action.src, node, msg);
             case "match":
@@ -296,11 +326,17 @@ module.exports = (RED) => {
                                        node, msg,
                                        action.index, action.suiteID, action.testID);
             default:
-                return Promise.rejject(new Error("unexpected kind of action: " +action.kind));
+                const addon = findAddonAction(action.kind);
+                if (addon) {
+                    return executeAddonAction(addon, action, node, msg);
+                }
+                else {
+                    return Promise.reject(new Error("unexpected kind of action: " +action.kind));
+                }
             }
         }
         catch (e) {
-            const msg = "Error: "+ e;
+            const msg = "error: "+ e;
             log(msg);
             console.log(msg);
         }
@@ -315,16 +351,15 @@ module.exports = (RED) => {
      *  @returns {Promise}
      */
     function processEvent(actions, node, msg) {
+        let promise = Promise.resolve(true);
         if (actions) {
-            let promise = Promise.resolve(true);
             for (let action of actions) {
                 promise = promise.then(() => 
                     executeAction(action, node, msg)
                 );
             }
-            return promise;
         }
-        return Promise.resolve(true);
+        return promise;
     }
 
     /**
@@ -464,8 +499,20 @@ module.exports = (RED) => {
         actionCount = 0;
         successActions = [];
         failActions = [];
+        // execute global actions first
         const actions = actionMap.setup["_global_"];
-        return processEvent(actions, null, null);
+        let promise = processEvent(actions, null, null);
+        // then, execute nodes events
+        for (let id of Object.keys(actionMap.setup)) {
+            if (id !== "_global_") {
+                const actions = actionMap.setup[id];
+                promise = promise.then(() => {
+                    const node = RED.nodes.getNode(id);
+                    return processEvent(actions, node, null);
+                });
+            }
+        }
+        return promise;
     }
 
 
@@ -475,11 +522,62 @@ module.exports = (RED) => {
      *  @returns {Promise}
      */
     function cleanup() {
+        // execute global actions first
         const actions = actionMap.cleanup["_global_"];
-
-        return processEvent(actions, null, null).then(() => {
+        let promise = processEvent(actions, null, null);
+        // then, execute nodes events
+        for (let id of Object.keys(actionMap.setup)) {
+            if (id !== "_global_") {
+                const actions = actionMap.cleanup[id];
+                promise = promise.then(() => {
+                    const node = RED.nodes.getNode(id);
+                    return processEvent(actions, node, null);
+                });
+            }
+        }
+        // finally, clear actions
+        return promise.then(() => {
             clearActions();
         });
+    }
+
+    function registerAddon(addon) {
+        addonList.push(addon);
+    }
+
+    function executeAddonAction(addon, action, node, msg) {
+        const exec = addon.execute;
+        const report = action.performCheck;
+        const index = action.index;
+        const sid = action.suiteID;
+        const tid = action.testID;;
+        if (exec) {
+            try {
+                return exec({
+                    action: action,
+                    node: node,
+                    msg: msg
+                }).then(() => {
+                    if (report) {
+                        reportResult(true, index, sid, tid);
+                    }
+                }).catch(() => {
+                    if (report) {
+                        reportResult(false, index, sid, tid);
+                    }
+                });;
+            }
+            catch (e) {
+                const msg = "error:"+ e;
+                log(msg);
+                console.log(msg);
+                if (report) {
+                    reportResult(false, index, sid, tid);
+                }
+                return Promise.reject();
+            }
+        };
+        return Promise.resolve();
     }
 
     // Register flow testing plugin
@@ -489,6 +587,18 @@ module.exports = (RED) => {
         },
         onadd: () => {
             const routeAuthHandler = RED.auth.needsPermission("flow-tester.write");
+
+            var plugins = RED.plugins.getByType('flow-tester-addon');
+            plugins.forEach(function(plugin) {
+                registerAddon(plugin);
+            })
+            RED.events.on("registry:plugin-added", function (id) {
+                var plugin = RED.plugins.get(id);
+                if (plugin.type === "flow-tester-addon") {
+                    registerAddon(plugin);
+                }
+            });
+            
 
             // Internal APIs for flow testing
             RED.httpAdmin.post(
@@ -522,6 +632,10 @@ module.exports = (RED) => {
                             // click the button of target node
                             // nothing to do
                             break;
+                        case "log":
+                            // log message
+                            promise = executeLog(opt.value);
+                            break;
                         case "set":
                             // set context or environment variable
                             promise = executeSet(opt.dst, opt.src);
@@ -535,7 +649,13 @@ module.exports = (RED) => {
                             promise = executeFunction(opt.code);
                             break;
                         default:
-                            console.log("unexpected action kind: ", kind);
+                            const addon = findAddonAction(action.kind);
+                            if (addon) {
+                                promise = executeAddonAction(addon, action, node, msg);
+                            }
+                            else {
+                                console.log("unexpected action kind: ", kind);
+                            }
                             break;
                         }
                         promise.then((result) => {
@@ -642,15 +762,17 @@ module.exports = (RED) => {
                     nodes.forEach(function (node) {
                         var acts = evMap[node];
                         acts.forEach(function (act) {
-                            if ((act.kind === "match") ||
-                                ((act.kind === "function") &&
-                                 act.performCheck)) {
+                            if (act.performCheck) {
                                 count++;
                             }
                         });
                     });
                 });     
                 return count;
+            }
+
+            function clearMatchResults() {
+                RED.comms.publish("flow-test:clear-match-result", {});
             }
 
             // API for executing a test case
@@ -665,6 +787,7 @@ module.exports = (RED) => {
                     const test = findTest(suite, tid);
                     
                     numberOfChecks = countNumberOfChecks(test.actions);
+                    clearMatchResults();
 
                     if (test) {
                         init().then(() => {
@@ -700,6 +823,8 @@ module.exports = (RED) => {
                 }
             );
 
+        },
+        onremove: () => {
         }
     });
 };
