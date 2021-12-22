@@ -8,6 +8,20 @@ module.exports = (RED) => {
             return [
                 {
                     name: "addon:example1",
+                    onTestStart: function () {
+                        let promise = Promise.resolve();
+                        promise = promise.then(() => {
+                            console.log("; start: addon:example1");
+                        });
+                        return promise;
+                    },
+                    onTestEnd: function () {
+                        let promise = Promise.resolve();
+                        promise = promise.then(() => {
+                            console.log("; end: addon:example1");
+                        });
+                        return promise;
+                    },
                     execute: function(opt) {
                         // opt object contains:
                         // - data: optional data for action

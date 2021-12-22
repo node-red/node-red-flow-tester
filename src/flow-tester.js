@@ -489,6 +489,37 @@ module.exports = (RED) => {
         return Promise.resolve(true);
     }
 
+    function executeTestStartAddon() {
+        let promise = Promise.resolve();
+        for (let addon of addonList) {
+            for (let action of addon.actions()) {
+                const cb = action.onTestStart;
+                if (cb) {
+                    promise = promise.then(() => {
+                        return cb();
+                    });
+                }
+            }
+        }
+        return promise;
+    }
+
+
+    function executeTestEndAddon() {
+        let promise = Promise.resolve();
+        for (let addon of addonList) {
+            for (let action of addon.actions()) {
+                const cb = action.onTestEnd;
+                if (cb) {
+                    promise = promise.then(() => {
+                        return cb();
+                    });
+                }
+            }
+        }
+        return promise;
+    }
+
     /**
      *  Initialize & process actions for setup event
      *  @param {Number} maxActs - max number of actions
@@ -499,9 +530,13 @@ module.exports = (RED) => {
         actionCount = 0;
         successActions = [];
         failActions = [];
+        // execute addon start callbacks
+        let promise = executeTestStartAddon();
         // execute global actions first
         const actions = actionMap.setup["_global_"];
-        let promise = processEvent(actions, null, null);
+        promise = promise.then(() => {
+            return processEvent(actions, null, null);
+        });
         // then, execute nodes events
         for (let id of Object.keys(actionMap.setup)) {
             if (id !== "_global_") {
@@ -514,7 +549,6 @@ module.exports = (RED) => {
         }
         return promise;
     }
-
 
     /**
      *  Process actions for cleanup event
@@ -535,6 +569,9 @@ module.exports = (RED) => {
                 });
             }
         }
+        promise = promise.then(() => {
+            return executeTestEndAddon();
+        });
         // finally, clear actions
         return promise.then(() => {
             clearActions();

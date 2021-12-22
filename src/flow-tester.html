@@ -16,6 +16,7 @@
     var id2test = {};
 
     var selectedTestID = undefined;
+    var selectedEvent = undefined;
 
     var currentTestSuite = null;
     var currentTestCase = null;
@@ -180,6 +181,84 @@
         return currentExecution;
     }
 
+    // node label for selection menu
+    function nodeLabel(node) {
+        const name = node.type +":" +node.id;
+        if (node.name && (node.name !== "")) {
+            return (node.name +" [" +name +"]");
+        }
+        return name;
+    }
+
+    function getNodeLabel(id, node, event) {
+        var div = $("<div/>", {
+            class: "red-ui-node-list-item red-ui-info-outline-item"
+        });
+        if (node) {
+            RED.utils.createNodeIcon(node, true).appendTo(div);
+            $(div).on("dblclick", function (ev) {
+                ev.preventDefault();
+                ev.stopPropagation();
+                selectedEvent = event;
+                RED.editor.edit(node);
+            });
+            $(div).on("mouseover", function (ev) {
+                node.highlighted = true;
+                node.dirty = true;
+                RED.view.redraw();
+            });
+            $(div).on("mouseout", function (ev) {
+                node.highlighted = false;
+                node.dirty = true;
+                RED.view.redraw();
+            });
+        }
+        else {
+            $("<span/>").text(id).appendTo(div);
+        }
+        return div;
+    }
+
+    function updateNodesInTestCase(test, tree) {
+        var treelist = tree.treeList;
+        var actions = test.actions;
+        for (var event of Object.keys(actions)) {
+            var nodeActions = actions[event];
+            var ids = Object.keys(nodeActions);
+            var hasAction = false;
+
+            for (var id of ids) {
+                var list = nodeActions[id];
+                if ((id !== "_global_") && (list.length > 0)) {
+                    hasAction = true;
+                    break;
+                }
+            }
+            if (!hasAction) {
+                continue;
+            }
+
+            var element = {
+                label: event,
+                icon: "fa fa-flash",
+                children: [],
+            };
+            treelist.addChild(element);
+
+            var eventlist = element.treeList;
+            for (var id of ids) {
+                var list = nodeActions[id];
+                if ((id !== "_global_") && (list.length > 0)) {
+                    var node = RED.nodes.node(id);
+                    var nodeElement = {
+                        element: getNodeLabel(id, node, event)
+                    };
+                    eventlist.addChild(nodeElement);
+                }
+            }
+        }
+    }
+
     /**
      *  Add new test case
      *  @param {Object} suiteNode - config node for test suite
@@ -191,13 +270,17 @@
         var sid = suiteNode.id;
         var suite = id2suite[sid];
         var treelist = suite.element.treeList;
-        var test = {
+        var children = [];
+        var element = {
             element: getTestCaseLabel(tid, name, suiteNode, newTest),
             icon: "fa fa-file-text-o",
+            children: children,
+            deferBuild: true,
         };
-        treelist.addChild(test);
+        treelist.addChild(element);
+        updateNodesInTestCase(newTest, element);
         treelist.expand();
-        id2test[tid] = test;
+        id2test[tid] = element;
     }
 
 
@@ -729,15 +812,6 @@
 
                 $(kind).val("click");
 
-                // node label for selection menu
-                function nodeLabel(node) {
-                    const name = node.type +":" +node.id;
-                    if (node.name && (node.name !== "")) {
-                        return (node.name +" [" +name +"]");
-                    }
-                    return name;
-                }
-
                 var sendNodes = RED.nodes.filterNodes({
                 }).filter(function (n) {
                     return (isMemberOfFlow(n) &&
@@ -1178,7 +1252,7 @@
      *  @param {Object} node - target node
      *  @param {string} testID - test case id
      */
-    function buildFlowTestTab(container, node, testID) {
+    function buildFlowTestTab(container, node, testID, event) {
         var isConfig = (node.type === "flow-test-config");
         var labelRow = $("<div/>", {
             class: "form-row",
@@ -1309,6 +1383,9 @@
                 tabs.activateTab("node-test-event-tab-send");
             }
         }
+        if (event) {
+            tabs.activateTab("node-test-event-tab-"+event);
+        }
 
         createTestSelector(
             node,
@@ -1354,6 +1431,7 @@
         var node = opt.node;
         if (node.type === "flow-test-config") {
             buildFlowTestTab($("#test-actions-container"), node, selectedTestID);
+            selectedTestID = undefined;
             return;
         }
         if (node._def.category === "config") {
@@ -1376,8 +1454,12 @@
             class: "dialog-form form-hirizontal"
         }).appendTo(flowTestTab.content);
 
-        buildFlowTestTab(dialogForm, node);
+        buildFlowTestTab(dialogForm, node, undefined, selectedEvent);
         tabs.addTab(flowTestTab);
+        if (selectedEvent) {
+            tabs.activateTab("editor-tab-flow-test");
+            selectedEvent = undefined;
+        }
     }
 
     /**
@@ -1498,6 +1580,16 @@
         logEditor.resize();
     }
 
+    function updateTestCaseNodes(testCase, element) {
+        // todo
+        if (element.element &&
+            element.element.treelist) {
+            element.element.treelist.empty();
+        }
+        element.children = [];
+        updateNodesInTestCase(testCase, element);
+    }
+
     /**
      *  Update sidebar contents related to specified node
      *  @param {Object} suiteNode - config node for test suite
@@ -1512,9 +1604,11 @@
         var tests = suiteNode.tests;
         for (let test of tests) {
             if (id2test[test.id]) {
-                var element = id2test[test.id].element;
+                var info = id2test[test.id];
+                var element = info.element;
                 var label = $(element).find(".test-case-label");
                 label.text(test.name);
+                updateTestCaseNodes(test, info);
             }
         }
     }
@@ -1695,6 +1789,13 @@
         updateSidebar(suite);
     }
 
+    function updateSidebarAll() {
+        for (var suite of suites) {
+            var node = suite.node;
+            updateSidebar(node);
+        }
+    }
+
     /**
      *  Handle node settings save event
      *  @param {Object} node - target ndoe
@@ -1716,6 +1817,9 @@
     function handleNodeAdd(node) {
         if (node.type === "flow-test-config") {
             addTestSuite(treeRoot, node);
+        }
+        else {
+            updateSidebarAll();
         }
     }
 
