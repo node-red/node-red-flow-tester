@@ -1,0 +1,142 @@
+// Example addon for flow tester action
+<link rel="stylesheet" href="resources/node-red-contrib-flow-tester-addon/style.css">
+
+<script type="text/javascript">
+(function() {
+    RED.plugins.registerPlugin("node-red-contrib--flow-tester-addon", {
+        type: "flow-tester-addon",
+        onadd: function() {
+        },
+        onremove: function() {
+        },
+        actions: function () {
+            return [
+                // plugin for outputting string to console
+                {
+                    name: "addon:example1",
+                    label: "output",
+                    onAddItem: function (opt) {
+                        // opt contains:
+                        // - node: target node
+                        // - event: event name
+                        // - container: container of editable list,
+                        // - selectRow: first row of the container
+                        // - data: initial data
+                        var node = opt.node;
+                        var con = opt.container;
+                        var row0 = opt.selectRow;
+                        var data = opt.data;
+                        var span = $("<span/>", {
+                            class: "addon-output-span"
+                        }).css({
+                            "margin-left": "5px"
+                        }).appendTo(row0);
+                        var input = $("<input/>", {
+                            type: "text",
+                            class: "addon-output-input",
+                        }).css({
+                            "margin-bottom": "0px"
+                        }).appendTo(span);
+                        if (data && data.value) {
+                            input.val(data.value);
+                        }
+                        span.hide();
+                        return true;
+                    },
+                    onSelect: function (opt) {
+                        // opt contains:
+                        // - container: container of editable list,
+                        // - selectRow: first row of the container
+                        var con = opt.container;
+                        var row0 = opt.selectRow;
+                        var span = row0.find(".addon-output-span");
+                        span.show();
+                    },
+                    onUnselect: function (opt) {
+                        // opt contains:
+                        // - container: container of editable list,
+                        // - selectRow: first row of the container
+                        var con = opt.container;
+                        var row0 = opt.selectRow;
+                        var span = row0.find(".addon-output-span");
+                        span.hide();
+                    },
+                    onSave: function (con) {
+                        var val = con.find(".addon-output-input").val();
+                        return {
+                            value: val,
+                            performCheck: false
+                        };
+                    }
+                },
+                {
+                    name: "addon:example2",
+                    label: "regexp match",
+                    onAddItem: function (opt) {
+                        // opt contains:
+                        // - node: target node
+                        // - event: event name
+                        // - container: container of editable list,
+                        // - selectRow: first row of the container
+                        // - data: initial data
+                        var node = opt.node;
+                        if (node.type === "flow-test-config") {
+                            // only applicable to node events
+                            return false;
+                        }
+                        var con = opt.container;
+                        var row0 = opt.selectRow;
+                        var data = opt.data;
+                        var span = $("<span/>", {
+                            class: "addon-regexp-span"
+                        }).css({
+                            "margin-left": "5px"
+                        }).appendTo(row0);
+                        var input = $("<input/>", {
+                            type: "text",
+                            class: "addon-regexp-input",
+                        }).css({
+                            "margin-bottom": "0px"
+                        }).appendTo(span);
+                        if (data && data.value) {
+                            input.val(data.value);
+                        }
+                        span.hide();
+                        return true;
+                    },
+                    onSelect: function (opt) {
+                        // opt contains:
+                        // - container: container of editable list,
+                        // - selectRow: first row of the container
+                        var con = opt.container;
+                        var row0 = opt.selectRow;
+                        var span = row0.find(".addon-regexp-span");
+                        if (span) {
+                            span.show();
+                        }
+                    },
+                    onUnselect: function (opt) {
+                        // opt contains:
+                        // - container: container of editable list,
+                        // - selectRow: first row of the container
+                        var con = opt.container;
+                        var row0 = opt.selectRow;
+                        var span = row0.find(".addon-regexp-span");
+                        if (span) {
+                            span.hide();
+                        }
+                    },
+                    onSave: function (con) {
+                        var val = con.find(".addon-regexp-input").val();
+                        return {
+                            value: val,
+                            performCheck: true
+                        };
+                    }
+                }
+            ];
+        }
+    });
+
+})();
+</script>
