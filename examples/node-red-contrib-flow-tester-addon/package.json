@@ -1,11 +1,7 @@
 {
-    "name": "node-red-flow-tester",
-    "version": "0.1.0",
-    "description": "A flow testing framework for Node-RED 2.x",
-    "repository": {
-        "type": "git",
-        "url": "https://github.com/node-red/node-red-flow-tester.git"
-    },
+    "name": "node-red-contrib-flow-tester-addon",
+    "version": "0.0.1",
+    "description": "A test plugin for flow tester addon",
     "scripts": {
         "build": "node scripts/build.js",
         "dev": "nodemon --exec 'npm run build'  -i dist -i resources -e 'css js html'",
@@ -23,11 +19,8 @@
     "node-red": {
         "version": ">=2.0.0",
         "plugins": {
-            "flow-tester": "dist/flow-tester.js"
-        },
-	"nodes": {
-            "flow-test-config": "nodes/flow-test-config.js"
-	}
+            "flow-tester-addon": "dist/flow-tester-addon.js"
+        }
     },
     "contributors": [
         {

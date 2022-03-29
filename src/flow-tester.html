@@ -1,17 +1,1929 @@
-
 <link rel="stylesheet" href="resources/node-red-flow-tester/style.css">
+
 <script type="text/javascript">
 (function() {
+    var content = null;
+    var panels = null;
+    var treeList = null;
+    var treeRoot = null;
+    var logContainer = null;
+    var logEditor = null;
+    var currentHeight = undefined;
+
+    var suiteCount = 0;
+    var suites = [];
+    var id2suite = {};
+    var id2test = {};
+
+    var selectedTestID = undefined;
+    var selectedEvent = undefined;
+
+    var currentTestSuite = null;
+    var currentTestCase = null;
+    var testResult = {
+        success: 0,
+        fail: 0
+    };
+    var numberOfChecks = 0;
+    var currentTimeout = null;
+
+    var workComplete = (function () {});
+
+    var currentExecution = Promise.resolve();
+    
+    var addonList = [];
+
+    var MAX_LOG = 1000;
+    var logs = [];
+
+    var TIMEOUT = 10;    	// timeout period of flow execution
+    var MAX_ACTIONS = 500;  // max number of actions 
+
+    /**
+     *  Show flow-tester sidebar
+     */
     function show() {
         RED.sidebar.show("flow-tester");
     }
 
+    /**
+     *  Resize sidebar contents
+     */
+    function resizeStack() {
+        var h = $(content).parent().height();
+        panels.resize(h);
+        var htl = $(treeList).parent().height();
+        treeList.css({
+            height: (htl -60)
+        });
+    }
+
+    /**
+     *  Invoke flow-tester action on runtime
+     *  @param {string} kind - kind of action
+     *  @param {Object} opt - options of the action
+     *  @returns {Promise} 
+     */
+    function invokeAction(kind, opt) {
+        return new Promise(function (resolve, reject) {
+            $.ajax({
+                url: "flow-tester/executeAction/"+ kind,
+                type: "POST",
+                contentType: "application/json",
+                data: JSON.stringify(opt || {})
+            }).done(function (data) {
+                resolve();
+            }).fail(function (xhr, stat, err) {
+                console.log(err);
+                reject();
+            });
+        });
+    }
+
+    /**
+     *  Invoke registerActions action on runtime
+     *  @param {string} sid - test suite id
+     *  @param {string} tid - test id
+     *  @param {string} event - event name
+     *  @param {array} actions - array of action definitions
+     *  @returns {Promise}
+     */ 
+    function registerActions(sid, tid, event, actions) {
+        return invokeAction("registerActions", {
+            suiteID: sid,
+            testID: tid,
+            event: event,
+            actions: actions
+        });
+    }
+
+    /**
+     *  Count number of expected checks for test case
+     *  @param {Object} map - action definition
+     *  @returns {Number} number of checks
+     */
+    function countNumberOfChecks(map) {
+        var count = 0;
+        var events = Object.keys(map);
+        for (let event of events) {
+            var evMap = map[event];
+            var nodes = Object.keys(evMap);
+            for (let node of nodes) {
+                var acts = evMap[node];
+                for (let act of acts) {
+                    if (act.performCheck) {
+                        count++;
+                    }
+                }
+            }
+        }
+        return count;
+    }
+
+    function clearMatchResults() {
+        testResult.success = 0;
+        testResult.fail = 0;
+    }
+
+    /**
+     *  Execute a test case
+     *  @param {Object} suiteNode - config node for test suite
+     *  @param {Object} testCase - test case definition
+     *  @returns {Promise} promise for executing test actions
+     */
+    function executeTestCase(suiteNode, testCase) {
+        let actions = testCase.actions || {};
+        let sid = suiteNode.id;
+        let tid = testCase.id;
+        let maxActions = (testCase.max_actions || MAX_ACTIONS);
+        let waitPromise = new Promise((resolve, reject) => {
+            workComplete = resolve;
+        });
+
+        return Promise.resolve().then(function () {
+            currentTestSuite = sid;
+            currentTestCase = tid;
+
+            numberOfChecks = countNumberOfChecks(actions);
+            clearMatchResults();
+
+            addLog("Running test: " +testCase.name);
+            return invokeAction("init", {});
+        }).then(function () {
+            let promise = Promise.resolve();
+            let events = Object.keys(actions);
+            for (let event of events) {
+                promise = promise.then(function () {
+                    return registerActions(sid, tid,
+                                           event,
+                                           actions[event]);
+                });
+            }
+            return promise;
+        }).then(function () {
+            return invokeAction("setup", {
+                maxActions: maxActions
+            });
+        }).then(function () {
+            let timeout = (testCase.timeout || TIMEOUT) *1000;
+            currentTimeout = setTimeout(function () {
+                addLog(`- timeout occured: ${testCase.timeout}s`);
+                invokeAction("cleanup").then(function () {
+                    workComplete();
+                });
+            }, timeout);
+            return waitPromise;
+        }).catch(function (e) {
+            invokeAction("cleanup").then(function () {
+                workComplete();
+            });
+        });
+        return currentExecution;
+    }
+
+    // node label for selection menu
+    function nodeLabel(node) {
+        const name = node.type +":" +node.id;
+        if (node.name && (node.name !== "")) {
+            return (node.name +" [" +name +"]");
+        }
+        return name;
+    }
+
+    function getNodeLabel(id, node, event) {
+        var div = $("<div/>", {
+            class: "red-ui-node-list-item red-ui-info-outline-item"
+        });
+        if (node) {
+            RED.utils.createNodeIcon(node, true).appendTo(div);
+            $(div).on("dblclick", function (ev) {
+                ev.preventDefault();
+                ev.stopPropagation();
+                selectedEvent = event;
+                RED.editor.edit(node);
+            });
+            $(div).on("mouseover", function (ev) {
+                node.highlighted = true;
+                node.dirty = true;
+                RED.view.redraw();
+            });
+            $(div).on("mouseout", function (ev) {
+                node.highlighted = false;
+                node.dirty = true;
+                RED.view.redraw();
+            });
+        }
+        else {
+            $("<span/>").text(id).appendTo(div);
+        }
+        return div;
+    }
+
+    function updateNodesInTestCase(test, tree) {
+        var treelist = tree.treeList;
+        var actions = test.actions;
+        for (var event of Object.keys(actions)) {
+            var nodeActions = actions[event];
+            var ids = Object.keys(nodeActions);
+            var hasAction = false;
+
+            for (var id of ids) {
+                var list = nodeActions[id];
+                if ((id !== "_global_") && (list.length > 0)) {
+                    hasAction = true;
+                    break;
+                }
+            }
+            if (!hasAction) {
+                continue;
+            }
+
+            var element = {
+                label: event,
+                icon: "fa fa-flash",
+                children: [],
+            };
+            treelist.addChild(element);
+
+            var eventlist = element.treeList;
+            for (var id of ids) {
+                var list = nodeActions[id];
+                if ((id !== "_global_") && (list.length > 0)) {
+                    var node = RED.nodes.node(id);
+                    var nodeElement = {
+                        element: getNodeLabel(id, node, event)
+                    };
+                    eventlist.addChild(nodeElement);
+                }
+            }
+        }
+    }
+
+    /**
+     *  Add new test case
+     *  @param {Object} suiteNode - config node for test suite
+     *  @param {Object} newTest - definition of new test case
+     */
+    function addTestCase(suiteNode, newTest) {
+        var tid = newTest.id;
+        var name = newTest.name;
+        var sid = suiteNode.id;
+        var suite = id2suite[sid];
+        var treelist = suite.element.treeList;
+        var children = [];
+        var element = {
+            element: getTestCaseLabel(tid, name, suiteNode, newTest),
+            icon: "fa fa-file-text-o",
+            children: children,
+            deferBuild: true,
+        };
+        treelist.addChild(element);
+        updateNodesInTestCase(newTest, element);
+        treelist.expand();
+        id2test[tid] = element;
+    }
+
+
+    /**
+     *  Newly creates internal test case id
+     *  @returns {string} new test case id
+     */
+    function newTestID() {
+        var id = "T"+Math.random().toString(32).substring(2);
+        return id;
+    }
+
+    /**
+     *  Create new test case
+     *  @param {Object} suiteNode - config node for test suite
+     *  @param {string} name - name of the test case
+     *  @returns {Object} definition of new test case
+     */
+    function createNewTest(suiteNode, name) {
+        var id = suiteNode.id;
+        var tests = suiteNode.tests;
+        var tid = newTestID();;
+        if (!name) {
+            name = "";
+        }
+        var newTest = {
+            id: tid,
+            name: name,
+            suite: id,
+            timeout: TIMEOUT,
+            max_actions: MAX_ACTIONS,
+            actions: {
+                // common events
+                setup: {},
+                cleanup: {},
+                // node specific events
+                recv: {},
+                stub: {},
+                send: {},
+            }, 
+        };
+        tests.push(newTest);
+        addTestCase(suiteNode, newTest);
+        return newTest;
+    }
+
+    /**
+     *  Creates test sute label for TreeList widget
+     *  @param {string} id - test suite id
+     *  @param {string} name - test suite name 
+     *  @param {Object} suiteNode - config node for test suite
+     *  @returns {Object} DOM element
+     */
+    function getSuiteLabel(id, name, suiteNode) {
+        var div = $("<div/>", {
+            class: "red-ui-suite-label"
+        }).css({
+        });
+        var labelDiv = $("<div/>", {
+            class: "test-suite-label"
+        }).css({
+            "min-height": "20px",
+        }).text(name).appendTo(div);
+        var controls = $("<div/>", {
+            class: "red-ui-suite-label-control",
+        }).css({
+        }).appendTo(div);
+        var editButton = $("<button/>", {
+            class: "red-ui-button red-ui-button-small"
+        }).css({
+            "margin-left": "3px"
+        }).appendTo(controls);
+        $("<i/>", {
+            class: "fa fa-pencil"
+        }).text("edit").appendTo(editButton);
+        var addButton = $("<button/>", {
+            class: "red-ui-button red-ui-button-small"
+        }).css({
+            "margin-left": "3px"
+        }).appendTo(controls);
+        $("<i/>", {
+            class: "fa fa-plus"
+        }).text("add").appendTo(addButton);
+
+        $(addButton).on("click", function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            var suite = id2suite[id];
+            createNewTest(suite.node, "New Test");
+        });
+        $(editButton).on("click", function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            RED.editor.edit(suiteNode);
+        });
+        return div;
+    }
+
+    /**
+     *  Creates test case label for TreeList widget
+     *  @param {string} id - test case id
+     *  @param {string} name - test case name 
+     *  @param {Object} suiteNode - config node for test suite
+     *  @param {Object} testCase - test case definition
+     *  @returns {Object} DOM element
+     */
+    function getTestCaseLabel(id, name, suiteNode, testCase) {
+        var div = $("<div/>", {
+            class: "red-ui-suite-label"
+        }).css({
+        });
+        $("<div/>", {
+            class: "test-case-label"
+        }).css({
+            "min-height": "20px",
+        }).text(name).appendTo(div);
+        var controls = $("<div/>", {
+            class: "red-ui-suite-label-control",
+        }).css({
+        }).appendTo(div);
+        var runButton = $("<button/>", {
+            class: "red-ui-button red-ui-button-small"
+        }).css({
+            "margin-left": "3px"
+        }).appendTo(controls);
+        $("<i/>", {
+            class: "fa fa-play"
+        }).text("run").appendTo(runButton);
+        var editButton = $("<button/>", {
+            class: "red-ui-button red-ui-button-small"
+        }).css({
+            "margin-left": "3px"
+        }).appendTo(controls);
+        $("<i/>", {
+            class: "fa fa-pencil"
+        }).text("edit").appendTo(editButton);
+
+        $(runButton).on("click", function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            executeTestCase(suiteNode, testCase);
+        });
+
+        $(editButton).on("click", function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            selectedTestID = id;
+            RED.editor.edit(suiteNode);
+        });
+
+        return div;
+    }
+
+
+    /**
+     *  Add new test suite to TreeList
+     *  @param {Object} root - root of TreeList
+     *  @param {Object} suite - config node for test suite
+     */
+    function addTestSuite(root, suite) {
+        var id = suite.id;
+        var name = suite.name;
+        var element = {
+            element: getSuiteLabel(id, name, suite),
+            icon: "fa fa-briefcase",
+            children: []
+        };
+        var newSuite = {
+            id: id,
+            node: suite,
+            element: element,
+        };
+        id2suite[id] = newSuite;
+        suites.push(newSuite);
+        
+        root.treeList.addChild(element);
+        var tests = suite.tests || [];
+        for (let test of tests) {
+            addTestCase(id2suite[id].node, test);
+        }
+    }
+
+
+    /**
+     *  Remove test suite
+     *  @param {string} id - test suite id 
+     */
+    function removeTestSuite(id) {
+        var suite = id2suite[id];
+        suite.element.treeList.remove();
+        delete id2suite[id];
+        suites = suites.filter(function (s) {
+            return (s.id !== id);
+        });
+    }
+
+    /**
+     *  Remove test case
+     *  @param {string} sid - test suite id
+     *  @param {string} id - test case id
+     *  @returns {array} array of new test case definitions
+     */
+    function removeTestCase(sid, id) {
+        var suite = id2suite[sid];
+        var node = suite.node;
+        var tests = node.tests;
+        var newTests = tests.filter(function (c) {
+            return c.id !== id;
+        });
+        var test = id2test[id];
+        test.treeList.remove();
+        delete id2test[id];
+        node.tests = newTests;
+        return newTests;
+    }
+
+    /**
+     *  Creates new test suite
+     *  @param {Object} root - root of TreeList
+     */
+    function addNewTestSuite(root) {
+        var def = RED.nodes.getType("flow-test-config");
+        var name = "Test Suite " +suiteCount++;
+        var id = RED.nodes.id();
+        var testNode = {
+            id: id,
+            _def: def,
+            type: "flow-test-config",
+            users: [],
+            name: name,
+            tests: []
+        };
+        RED.nodes.add(testNode);
+        RED.nodes.dirty(true);
+    }
+
+    /**
+     *  Create side bar view for test suites
+     *  @param {Object} testPanel - DOM element for test suites
+     */
+    function createTestSuites(testsPanel) {
+        var labelDiv = $("<div/>", {
+            class: "form-row compact"
+        }).css({
+            "margin-left": "5px"
+        }).appendTo(testsPanel);
+        $("<b/>").css({
+        }).text("Test Suites").appendTo(labelDiv);
+        treeList = $("<div/>").css({
+            width: "100%"
+        }).appendTo(testsPanel);
+        var addSuiteButton = $("<button/>", {
+            class: "red-ui-button red-ui-button-small"
+        }).css({
+            float: "right",
+            "margin-top": "5px",
+            "margin-right": "5px",
+        }).text("+ add").appendTo(testsPanel);
+        var root = {
+            label: "Test Suites",
+            expanded: true,
+            children: []
+        };
+        treeRoot = root;
+        addSuiteButton.on("click", function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            addNewTestSuite(root);
+        });
+
+        treeList.treeList({
+            data: [root]
+        });
+    }
+
+    function findAddonAction(name) {
+        for (let addon of addonList) {
+            for (let def of addon.actions()) {
+                if (def.name === name) {
+                    return def;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     *  Check that specified node belongs to a flow 
+     *  @param {Object} node - node to be checked
+     *  @returns {boolean} true if the node belongs to a flow 
+     */
+    function isMemberOfFlow(node) {
+        var sf = RED.nodes.subflow(node.z);
+        return (!sf);
+    }
+
+    function unselectAllAddon(opt) {
+        for (let addon of addonList) {
+            for (let def of addon.actions()) {
+                const onUnselect = def.onUnselect;
+                if (onUnselect) {
+                    onUnselect(opt);
+                }
+            }
+        }
+    }
+
+    function prepareAllAddon(opt) {
+        var actions = [];
+        for (let addon of addonList) {
+            for (let def of addon.actions()) {
+                const onAddItem = def.onAddItem;
+                if (onAddItem) {
+                    if (onAddItem(opt)) {
+                        actions.push(def);
+                    }
+                }
+            }
+        }
+        return actions;
+    }
+
+    /**
+     *  Create a tab for setting event information
+     *  @param {string} id - ID of DOM element
+     *  @param {Object} container - enclosing DOM element
+     *  @param {Object} node - target node 
+     *  @param {string} event - name of event 
+     */
+    function createEventTab(id, container, node, event) {
+        var div = $("<div/>", {
+            id: id
+        }).css({
+            display: "none"
+        }).appendTo(container);
+        var actionList = $("<ul/>", {
+            id: id+"-list"
+        }).appendTo(div);
+        actionList.css({
+            "min-height": "300px",
+            "min-width": "430px" 
+        }).editableList({
+            addItem: function(con, i, opt) {
+                var row0 = $("<div/>", {
+                    class: "form-row"
+                }).css({
+                }).appendTo(con);
+                var row1 = $("<div/>", {
+                    hidden: true
+                }).css({
+                    "margin-top": "3px"
+                }).appendTo(con);
+                var row2 = $("<div/>", {
+                    hidden: true
+                }).css({
+                    "margin-top": "3px"
+                }).appendTo(con);
+                var row3 = $("<div/>", {
+                    hidden: true
+                }).css({
+                    "margin-top": "3px"
+                }).appendTo(con);
+                
+                var kind = $("<select/>", {
+                    class: "action-kind"
+                }).css({
+                    width: "100px",
+                    display: "inline-block",
+                    "text-align": "center",
+                    "margin-left": "5px",
+                    "margin-bottom": "0px",
+                }).appendTo(row0);
+
+                var valSpan = $("<span/>").appendTo(row0);
+                var valField = $("<input/>", {
+                    class: "action-value"
+                }).css({
+                    display: "inline-block",
+                    "margin-left": "8px",
+                    width: "calc(100% - 130px)"
+                }).appendTo(valSpan);
+                $(valField).typedInput({
+                    default: "str",
+                    types: [
+                        "str", "num", "bool", "json", "bin",
+                        "re", "date", "jsonata", "env"
+                    ]
+                });
+
+                var clickTargetSpan = $("<span/>").appendTo(row0);
+                var clickTarget = $("<select/>", {
+                    class: "action-click-target"
+                }).css({
+                    "margin-left": "13px",
+                    "margin-bottom": "0px"
+                }).appendTo(clickTargetSpan);
+
+                var numSpan = $("<span/>").appendTo(row0);
+                var numField = $("<input/>", {
+                    class: "action-wait-ms"
+                }).css({
+                    "margin-left": "13px",
+                    width: "100pt"
+                }).appendTo(numSpan);
+                $(numField).typedInput({
+                    default: "num",
+                    types: [
+                        "num"
+                    ]
+                });
+                $("<label/>", {
+                }).css({
+                    "text-align": "left",
+                    width: "100px",
+                    "margin-left": "5px"
+                }).text("ms").appendTo(numSpan);
+
+                var varSpan = $("<span/>").appendTo(row0);
+                var varField = $("<input/>", {
+                    class: "action-var"
+                }).css({
+                    display: "inline-block",
+                    "margin-left": "8px",
+                    width: "calc(100% - 130px)"
+                }).appendTo(varSpan);
+                $(varField).typedInput({
+                    default: "flow",
+                    types: [
+                        "flow", "global"
+                    ]
+                });
+
+                var jsSpan = $("<span/>").appendTo(row0);
+                var jsField = $("<input/>", {
+                    class: "action-js"
+                }).css({
+                    display: "inline-block",
+                    "margin-left": "8px",
+                    width: "calc(100% - 130px)"
+                }).appendTo(jsSpan);
+                $(jsField).typedInput({
+                    default: "js",
+                    types: [
+                        {
+                            value: "js",
+                            label: "JavaScript",
+                            icon: "fa fa-edit",
+                            hasValue: true,
+                            expand: function () {
+                                var that = this;
+                                RED.editor.editJavaScript({
+                                    value: this.value().replace(/\t/g, "\n"),
+                                    complete: function (v) {
+                                        that.value(v.replace(/\n/g, "\t"));
+                                    }
+                                });
+                            }
+                        }
+                    ]
+                });
+                var checkInJS = $("<input/>", {
+                    type: "checkbox",
+                    class: "action-js-perform-check"
+                }).css({
+                    width: "fit-content",
+                    "margin-left": "120px"
+                }).appendTo(row3);
+                $("<span/>").css({
+                    "margin-left": "8px"
+                }).text("performs check").appendTo(row3);
+
+                $("<label/>", {
+                }).css({
+                    display: "inline-block",
+                    "text-align": "right",
+                    width: "100px"
+                }).text("to").appendTo(row1);
+                var sendTarget = $("<select/>", {
+                    class: "action-send-target"
+                }).css({
+                    "margin-left": "13px"
+                }).appendTo(row1);
+
+                $("<label/>", {
+                }).css({
+                    display: "inline-block",
+                    "text-align": "right",
+                    width: "100px"
+                }).text("to the value").appendTo(row2);
+                var valFieldSet = $("<input/>", {
+                    class: "action-value-set"
+                }).css({
+                    display: "inline-block",
+                    "margin-left": "13px",
+                    width: "calc(100% - 160px)"
+                }).appendTo(row2);
+                $(valFieldSet).typedInput({
+                    default: "str",
+                    types: [
+                        "str", "num", "bool", "json", "bin",
+                        "re", "date", "jsonata", "env"
+                    ]
+                });
+
+                var activeActions = prepareAllAddon({
+                    node: node,
+                    event: event,
+                    container: con,
+                    selectRow: row0,
+                    data: opt
+                });
+
+                var actions =
+                    (node.type === "flow-test-config") ? [
+                        "click", "send", "wait", "log", "function"
+                    ] : [
+                        "click", "send", "set", "match", "wait", "log", "function"
+                    ];
+                for (let action of actions) {
+                    $("<option/>", {
+                    }).val(action).text(action).appendTo(kind);
+                }
+                for (let def of activeActions) {
+                    const name = def.name;
+                    const label = def.label;
+                    $("<option/>", {
+                    }).val(name).text(label).appendTo(kind);
+                }
+
+                $(kind).val("click");
+
+                var sendNodes = RED.nodes.filterNodes({
+                }).filter(function (n) {
+                    return (isMemberOfFlow(n) &&
+                            (n.inputs > 0));
+                });;
+                $(sendTarget).empty();
+                for (let node of sendNodes) {
+                    var id = node.id;
+                    var name = nodeLabel(node);
+                    $("<option/>").text(name).val(id).appendTo(sendTarget);
+                }
+
+                var clickNodes = RED.nodes.filterNodes({
+                }).filter(function (n) {
+                    return (isMemberOfFlow(n) &&
+                            (n.inputs === 0) &&
+                            n._def.hasOwnProperty("button"))
+                });
+                $(clickTarget).empty();
+                for (let node of clickNodes) {
+                    var id = node.id;
+                    var name = nodeLabel(node);
+                    $("<option/>").text(name).val(id).appendTo(clickTarget);
+                }
+
+                $(kind).on("change", function (ev) {
+                    $(valSpan).hide();
+                    $(clickTargetSpan).hide();
+                    $(numSpan).hide();
+                    $(varSpan).hide();
+                    $(jsSpan).hide();
+
+                    $(row1).hide();
+                    $(row2).hide();
+                    $(row3).hide();
+
+                    unselectAllAddon({
+                        container: con,
+                        selectRow: row0
+                    });
+                    var val = $(kind).val();
+                    if(val === "send") {
+                        $(valSpan).show();
+                        $(row1).show();
+                    }
+                    else if (val === "click") {
+                        $(clickTargetSpan).show();
+                    }
+                    else if (val === "set") {
+                        $(varSpan).show();
+                        $(row2).show();
+                    }
+                    else if (val === "match") {
+                        $(valSpan).show();
+                    }
+                    else if (val === "wait") {
+                        $(numSpan).show();
+                    }
+                    else if (val === "log") {
+                        $(valSpan).show();
+                    }
+                    else if (val === "function") {
+                        $(jsSpan).show();
+                        $(row3).show();
+                    }
+                    else {
+                        var action = findAddonAction(val);
+                        if (action) {
+                            const onSelect = action.onSelect;
+                            if (onSelect) {
+                                onSelect({
+                                    container: con,
+                                    selectRow: row0
+                                });
+                            }
+                        }
+                        else {
+                            throw new Error("unexpected action:"+val);
+                        }
+                    }
+                });
+
+                if (opt) {
+                    var act_kind = opt.kind;
+                    if (act_kind) {
+                        $(kind).val(act_kind);
+                        switch (act_kind) {
+                        case "send":
+                            var act_val = opt.value;
+                            if (act_val) {
+                                $(valField).typedInput("value", act_val);
+                            }
+                            var act_target = opt.target;
+                            if (act_target) {
+                                $(sendTarget).val(act_target);
+                            }
+                            break;
+                        case "click":
+                            var act_target = opt.target;
+                            if (act_target) {
+                                $(clickTarget).val(act_target);
+
+                            }
+                            break;
+                        case "set":
+                            var act_dst = opt.dst;
+                            if (act_dst &&
+                                act_dst.hasOwnProperty("type") &&
+                                act_dst.hasOwnProperty("value")) {
+
+                                $(varField).typedInput("type", act_dst.type);
+                                $(varField).typedInput("value", act_dst.value);
+                            }
+                            var act_src = opt.src;
+                            if (act_src &&
+                                act_src.hasOwnProperty("type") &&
+                                act_src.hasOwnProperty("value")) {
+                                $(valFieldSet).typedInput("type", act_src.type);
+                                $(valFieldSet).typedInput("value", act_src.value);
+                            }
+                            break;
+                        case "match":
+                            if (opt.hasOwnProperty("value")) {
+                                $(valField).typedInput("value", opt.value);
+                            }
+                            break;
+                        case "wait":
+                            if (opt.hasOwnProperty("wait")) {
+                                $(numField).typedInput("value", opt.wait);
+                            }
+                            break;
+                        case "log":
+                            if (opt.hasOwnProperty("value")) {
+                                $(valField).typedInput("value", opt.value);
+                            }
+                            break;
+                        case "function":
+                            if (opt.code) {
+                                $(jsField).typedInput("value", opt.code);
+                            }
+                            checkInJS.prop("checked", !!opt.performCheck);
+                            break;
+                        default:
+                            if (!findAddonAction(act_kind)) {
+                                throw new Error("unexpected kind of action: " +act_kind);
+                            }
+                            break;
+                        }
+                    }
+                }
+                $(kind).change();
+            },
+            removable: true,
+            sortable: true,
+        });
+    }
+
+    /**
+     *  Get list of test suite definitions
+     *  @returns {array} Array of test suites
+     */
+    function getSuites() {
+        return Object.values(suites);
+    }
+
+    /** 
+     *  Update test case selector menu
+     *  @param {Object} caseSel - DOM of test case selector
+     *  @param {array} cases - array of test case definitions
+     *  @returns {string} id of selected item
+     */
+    function updateCaseSelector(caseSel, cases) {
+        var caseID = null;
+        caseSel.empty();
+        for (let def of cases) {
+            var val = def.id;
+            var name = def.name;
+            $("<option/>").val(val).text(name).appendTo(caseSel);
+            caseID = caseID || val;
+        }
+        $("<option/>").val("_NEW_").text("new...").appendTo(caseSel);
+        caseID = caseID || "_NEW_";
+        caseSel.val(caseID);
+        return caseID;
+    }
+
+    /**
+     *  Load flow test settings for specified node
+     *  @param {Object} currentCase - currently selected test case
+     *  @param {array} events - list of events
+     *  @param {Object} node - target node
+     */
+    function loadActions(currentCase, events, node) {
+        if (!currentCase) {
+            return;
+        }
+        var nid = "_global_";  // '_global_' represents global events
+        if (node.type !== "flow-test-config") {
+            nid = node.id;
+        }
+        for (let event of events) {
+            var actions0 = currentCase.actions || {};
+            var actions1 = actions0[event] || {};
+            var actions = actions1[nid] || [];
+            var listID = "node-test-event-tab-" +event +"-list";
+            var list = $("#"+listID);
+            list.editableList("empty");
+            for (let action of actions) {
+                list.editableList("addItem", action);
+            }
+        }
+    }
+
+    /**
+     *  Clear actions list of events tab
+     *  @param {array} events - list of events
+     */
+    function clearActions(events) {
+        for (let event of events) {
+            var listID = "node-test-event-tab-" +event +"-list";
+            var list = $("#"+listID);
+            list.editableList("empty");
+        }
+    }
+
+    /**
+     *  Update test suite selector menu
+     *  @param {Object} selector - DOM of test suite selector
+     *  @param {array} suites - array of test suites
+     *  @returns {string} id of selected item
+     */
+    function updateSuiteSelector(selector, suites) {
+        var initVal = undefined;
+        for (let suite of suites) {
+            var node = suite.node;
+            var sid = node.id;
+            var sname = node.name;
+            initVal = initVal || sid;
+
+            $("<option/>", {
+            }).val(sid).text(sname).appendTo(selector);
+        }
+        $("<option/>", {
+        }).val("_NEW_").text("new...").appendTo(selector);
+        initVal = initVal || "_NEW_";
+        selector.val(initVal);
+        return initVal;
+    }
+
+    /**
+     *  Creates interface for inputting test suite and test case
+     *  @param {Object} node - target node
+     *  @param {Object} suiteSel - DOM of test suite selector
+     *  @param {Object} suiteInput - DOM of test suite name input
+     *  @param {Object} suiteDelButton - DOM of test suite delete button
+     *  @param {Object} caseSel - DOM of test case selector
+     *  @param {Object} caseInput - DOM of test case name input
+     *  @param {Object} caseDelButton - DOM of test case delete button
+     *  @param {string} initialCaseID - initial id of test case
+     *  @param {array} events - list of events
+     */
+    function createTestSelector(
+        node,
+        suiteSel, suiteInput, suiteDelButton, 
+        caseSel, caseInput, caseDelButton,
+        initialCaseID, events) {
+        var isConfig = (node.type === "flow-test-config");
+        var suites = getSuites();
+
+        var currentCases = [];
+        var defaultCaseID = "_NEW_";
+        if (suiteSel) {
+            var initialSuiteID = updateSuiteSelector(suiteSel, suites);
+            suiteSel.on("change", function (ev) {
+                var sid = suiteSel.val();
+                if (sid === "_NEW_") {
+                    suiteDelButton.hide();
+                    $(suiteInput).typedInput("value", "New Test Suite");
+                    defaultCaseID = updateCaseSelector(caseSel, []);
+                    currentCases = tests;
+                }
+                else {
+                    var suite = id2suite[sid];
+                    var suiteNode = suite.node;
+                    var tests = suiteNode.tests;
+                    defaultCaseID = updateCaseSelector(caseSel, tests);
+                    currentCases = tests;
+
+                    if (suite) {
+                        var name = suite.node.name;
+                        $(suiteInput).typedInput("value", name);
+                    }
+                    suiteDelButton.show();
+                }
+                $(caseSel).val(defaultCaseID);
+                $(caseSel).change();
+            });
+            suiteSel.val(initialSuiteID);
+            suiteSel.change();
+        }
+        else {
+            var suite = id2suite[node.id];
+            var suiteNode = suite.node;
+            var tests = suiteNode.tests;
+
+            defaultCaseID = updateCaseSelector(caseSel, tests);
+            currentCases = tests;
+        }
+
+        caseSel.on("change", function (ev) {
+            var caseid = caseSel.val();
+            if (caseid === "_NEW_") {
+                caseDelButton.hide();
+                var name = "";
+                $(caseInput).typedInput("value", name);
+                $("#flow-test-timeout").typedInput("value", TIMEOUT);
+                $("#flow-test-max-actions").typedInput("value", MAX_ACTIONS);
+                clearActions(events);
+            }
+            else {
+                var currentCase = currentCases.find(function (e) { return e.id === caseid; });
+                if (currentCase) {
+                    $(caseInput).typedInput("value", currentCase.name);
+                }
+                caseDelButton.show();
+                var timeout = currentCase.timeout || TIMEOUT;
+                var max_actions = currentCase.max_actions || MAX_ACTIONS;
+                $("#flow-test-timeout").typedInput("value", timeout);
+                $("#flow-test-max-actions").typedInput("value", max_actions);
+                loadActions(currentCase, events, node);
+            }
+        });
+
+        var caseID = initialCaseID ? initialCaseID : defaultCaseID;
+        caseSel.val(caseID);
+        caseSel.change();
+
+        if (suiteDelButton) {
+            suiteDelButton.on("click", function (ev) {
+                ev.preventDefault();
+                ev.stopPropagation();
+                var sid = suiteSel.val();
+                if (sid === "_NEW_") {
+                    removeTestSuite(sid);
+                    updateSuiteSelector(suiteSel, suites);
+                    suiteSel.val("_NEW_");
+                    suiteSel.change();
+                }            
+            });
+        }
+
+        caseDelButton.on("click", function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            var caseid = caseSel.val();
+            if (caseid !== "_NEW_") {
+                var sid = suiteSel ? suiteSel.val() : node.id;
+                var newCases = removeTestCase(sid, caseid);
+                updateCaseSelector(caseSel, newCases);
+                caseSel.val("_NEW_");
+                caseSel.change();
+            }
+        });
+    }
+
+
+    /**
+     *  Creates test suite/case input field
+     *  @param {Object} container - enclosing DOM element
+     *  @param {string} kind - suite/test
+     *  @param {string} name - name of test suite/case
+     *  @return {array} - array of DOMs: selector, input field, and delete button
+     */
+    function buildCaseInputs(container, kind, name) {
+        var selectRow = $("<div/>", {
+            class: "form-row"
+        }).appendTo(container);
+        $("<label/>").css({
+            "margin-left": "10px",
+            width: "90px"
+        }).text(name).appendTo(selectRow);
+        var selector = $("<select/>", {
+            id: "flow-test-" +kind,
+        }).css({
+            width: "calc(30% - 25px)",
+            "margin-bottom": "0px",
+        }).appendTo(selectRow);
+        var input = $("<input/>", {
+            id: "flow-test-name-" +kind,
+            placeholder: name,
+        }).css({
+            width: "calc(50% - 25px)",
+            "margin-left": "10px"
+        }).appendTo(selectRow);
+        $(input).typedInput({
+            default: "str",
+            types: [
+                "str"
+            ]
+        });
+
+        var delButton = $("<button/>", {
+            class: "red-ui-button red-ui-button-small"
+        }).css({
+            "vertical-align": "top",
+            "margin-top": "3px",
+            "margin-left": "3px"
+        }).appendTo(selectRow);
+        $("<i/>", {
+            class: "fa fa-trash"
+        }).appendTo(delButton);
+
+        return [selector, input, delButton];
+    }
+
+    /**
+     *  Creates list of events for specified node
+     *  @param {Object} node - target node
+     *  @returns {array} array of events
+     */
+    function nodeEvents(node) {
+        var events = ["setup", "cleanup"];
+        if (node.inputs > 0) {
+            // if node has input port, recv and stub events supported
+            events.push("recv");
+            events.push("stub");
+        }
+        if (node.outputs > 0) {
+            // if node has output port, send event supported
+            events.push("send");
+        }
+        return events;
+    }
+
+    /**
+     *  Create tab for flow testing in node settings panel
+     *  @param {Object} container - enclosing DOM element
+     *  @param {Object} node - target node
+     *  @param {string} testID - test case id
+     */
+    function buildFlowTestTab(container, node, testID, event) {
+        var isConfig = (node.type === "flow-test-config");
+        var labelRow = $("<div/>", {
+            class: "form-row",
+        }).appendTo(container);
+        $("<div/>", {
+        }).css({
+            width: "170px"
+        }).text("Events & Actions").appendTo(labelRow);
+        var suiteSelector = null;
+        var suiteInput = null;
+        var suiteDelButton = null;
+        var suiteUpdateButton = null;
+        if (!isConfig) {
+            [suiteSelector, suiteInput, suiteDelButton]
+                = buildCaseInputs(container, "suite", "Test Suite");
+        }
+        var [testSelector, testInput, testDelButton]
+            = buildCaseInputs(container, "test", "Test Case");
+
+        var timeoutDiv = $("<div/>", {
+            class: "form-row",
+        }).css({
+        }).appendTo(container);
+        $("<label/>").text("Timeout").appendTo(timeoutDiv);
+        var timeoutField = $("<input/>", {
+            id: "flow-test-timeout"
+        }).css({
+            width: "150px"
+        }).appendTo(timeoutDiv);
+        $("<label/>", {
+        }).css({
+            "margin-left": "5px"
+        }).text("sec").appendTo(timeoutDiv);
+        $(timeoutField).typedInput({
+            default: "num",
+            types: [
+                "num"
+            ]
+        });
+
+        var maxActionsDiv = $("<div/>", {
+            class: "form-row",
+        }).css({
+        }).appendTo(container);
+        $("<label/>").css({
+        }).text("Limit Actions").appendTo(maxActionsDiv);
+        var maxActionsField = $("<input/>", {
+            id: "flow-test-max-actions"
+        }).css({
+            width: "150px"
+        }).appendTo(maxActionsDiv);
+        $(maxActionsField).typedInput({
+            default: "num",
+            types: [
+                "num"
+            ]
+        });
+
+        var eventsContainer = $("<div/>", {
+            class: "form-row",
+        }).css({
+        }).appendTo(container);
+        var eventsTab = $("<ul/>", {
+            id: "node-test-event-tabs"
+        }).css({
+            "min-width": "600px",
+            "margin-bottom": "20px"
+        }).appendTo(eventsContainer);
+        var tabContainer = $("<div/>", {
+            id: "node-test-event-tabs-content"
+        }).css({
+            "min-height": "calc(100% - 95px)"
+        }).appendTo(container);
+        var tabs = RED.tabs.create({
+            id: "node-test-event-tabs",
+            onchange: function(tab) {
+                $("#node-test-event-tabs-content").children().hide();
+                $("#" +tab.id).show();
+                resizeActionList(tab.id);
+            }
+        });
+        var events = null;
+        // common events & actions
+        createEventTab("node-test-event-tab-setup", tabContainer, node, "setup");
+        createEventTab("node-test-event-tab-cleanup", tabContainer, node, "cleanup"); 
+        tabs.addTab({
+            id: "node-test-event-tab-setup",
+            label: "setup"
+        });
+        tabs.addTab({
+            id: "node-test-event-tab-cleanup",
+            label: "cleanup"
+        });
+        tabs.activateTab("node-test-event-tab-setup");
+        if (node.type === "flow-test-config") {
+            events = ["setup", "cleanup"];
+        }
+        else {
+            // node events & actions
+            var hasInput = (node.inputs > 0);
+            var hasOutput = (node.outputs > 0);
+
+            events = nodeEvents(node);
+            if (hasInput) {
+                createEventTab("node-test-event-tab-recv", tabContainer, node, "recv"); 
+                tabs.addTab({
+                    id: "node-test-event-tab-recv",
+                    label: "receive"
+                });
+
+                createEventTab("node-test-event-tab-stub", tabContainer, node, "stub"); 
+                tabs.addTab({
+                    id: "node-test-event-tab-stub",
+                    label: "stub"
+                });
+            }
+            if (hasOutput) {
+                createEventTab("node-test-event-tab-send", tabContainer, node, "send"); 
+                tabs.addTab({
+                    id: "node-test-event-tab-send",
+                    label: "send"
+                });
+            }
+            if (hasInput) {
+                tabs.activateTab("node-test-event-tab-recv");
+            }
+            else {
+                tabs.activateTab("node-test-event-tab-send");
+            }
+        }
+        if (event) {
+            tabs.activateTab("node-test-event-tab-"+event);
+        }
+
+        createTestSelector(
+            node,
+            suiteSelector, suiteInput, suiteDelButton, 
+            testSelector, testInput, testDelButton,
+            testID, events);
+    }
+
+
+    /**
+     *  Add logging text to sidebar panel
+     *  @param {string} line - message to be added
+     */
+    function addLog(line) {
+        logs.push(line);
+        if (logs.length > 500) {
+            logs = logs.slice(-500);
+        }
+        if (logEditor) {
+            var session = logEditor.getSession();
+            session.insert({
+                row: session.getLength(),
+                column: 0,
+            }, "\n" + line);
+            logEditor.scrollToLine(session.getLength());
+        }
+    }
+
+    function clearLog() {
+        logs = [];
+        if (logEditor) {
+            var session = logEditor.getSession();
+            session.setValue("", -1);
+        }        
+    }
+
+    /**
+     *  Handle node settings dialog prepare event for setting up flow
+     *  test tab 
+     *  @param {Object} opt - dialog preparation options
+     */
+    function handleNodeDialogPrepare(opt) {
+        var node = opt.node;
+        if (node.type === "flow-test-config") {
+            buildFlowTestTab($("#test-actions-container"), node, selectedTestID);
+            selectedTestID = undefined;
+            return;
+        }
+        if (node._def.category === "config") {
+            return;
+        }
+        var tabs = opt.tabs;
+        var content = opt.content;
+        var flowTestTab = {
+            id: "editor-tab-flow-test",
+            label: "Flow Test",
+            name: "Flow Test",
+            content: $('<div>', {
+                class: "red-ui-tray-content"
+            }).appendTo(content).hide(),
+            iconClass: "fa fa-check-circle",
+            onchange: function() {
+            }
+        };
+        var dialogForm = $("<form/>", {
+            class: "dialog-form form-hirizontal"
+        }).appendTo(flowTestTab.content);
+
+        buildFlowTestTab(dialogForm, node, undefined, selectedEvent);
+        tabs.addTab(flowTestTab);
+        if (selectedEvent) {
+            tabs.activateTab("editor-tab-flow-test");
+            selectedEvent = undefined;
+        }
+    }
+
+    /**
+     *  Execute all test cases in specified test suite
+     *  @param {Object} suite - test suite definition
+     *  @returns {Promise}
+     */
+    function executeTestSuite(suite) {
+        let node = suite.node;
+        addLog("Run test suite: " +node.name);
+        let tests = node.tests || [];
+        let  promise = Promise.resolve()
+        for (let test of tests) {
+            promise = promise.then(function () {
+                return executeTestCase(node, test);
+            });
+        }
+        return promise;
+    }
+    
+    /**
+     *  Execute all test suites
+     *  @returns {Promise}
+     */
+    function executeAllTests() {
+        addLog("Run all test suites");
+        let promise = Promise.resolve();
+        for (let suite of suites) {
+            promise = promise.then(function () {
+                return executeTestSuite(suite);
+            });
+        }
+        return promise;
+    }
+
+    /**
+     *  Create sidebar for flow testing
+     *  @param {Object} div - enclosing DOM element
+     */
+    function createSidebarContent(div) {
+        content = div;
+        var controlDiv = $("<div/>", {
+            class: "form-row compact"
+        }).css({
+            "margin": "20px 10px"
+        }).appendTo(div);
+        var stackContainer = $("<div/>", {
+        }).appendTo(div);
+        var testsPanel = $("<div/>", {
+            class: "form-row compact"
+        }).appendTo(stackContainer);
+        var logPanel = $("<div/>", {
+            class: "form-row node-text-editor-row",
+        }).appendTo(stackContainer);
+        logContainer = $("<div/>", {
+            class: "node-text-editor",
+        }).css({
+            margin: "5px",
+            width: "95%",
+            height: "calc(95% - 10px)",
+            "min-height": "150px",
+        }).appendTo(logPanel);
+        var logControl = $("<div/>", {
+        }).css({
+            "text-align": "right",
+            "margin-right": "20px"
+        }).appendTo(logPanel);
+        var logClearButton = $("<i/>", {
+            class: "red-ui-button red-ui-button-small"
+        }).css({
+            "margin-left": "3px"
+        }).appendTo(logControl);
+        $("<i/>", {
+            class: "fa fa-trash"
+        }).appendTo(logClearButton);
+
+        panels = RED.panels.create({
+            container: stackContainer
+        });
+        panels.ratio(0.5);
+
+        var runButton = $("<button/>", {
+            class: "red-ui-button red-ui-button-small",
+        }).appendTo(controlDiv);
+        $("<i/>", {
+            class: "fa fa-play"
+        }).appendTo(runButton);
+        $("<label/>").css({
+            "margin-left": "5px",
+        }).text("Run Tests").appendTo(controlDiv);
+                      
+        createTestSuites(testsPanel);
+
+        runButton.on("click", function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            executeAllTests();
+        });
+
+        logEditor = RED.editor.createEditor({
+            mode: "ace/mode/text",
+            value: logs.join("\n"),
+            element: logContainer,
+            lineNumbers: false,
+            readOnly: true,
+        });
+
+        logClearButton.on("click", function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            clearLog();
+        });
+
+
+        setTimeout(function () {
+            addLog("Starting Flow Tester");
+        }, 1000);
+        logEditor.resize();
+    }
+
+    function updateTestCaseNodes(testCase, element) {
+        // todo
+        if (element.element &&
+            element.element.treelist) {
+            element.element.treelist.empty();
+        }
+        element.children = [];
+        updateNodesInTestCase(testCase, element);
+    }
+
+    /**
+     *  Update sidebar contents related to specified node
+     *  @param {Object} suiteNode - config node for test suite
+     */
+    function updateSidebar(suiteNode) {
+        var name = suiteNode.name;
+        var suite = id2suite[suiteNode.id];
+        var element = suite.element.element;
+        var label = $(element).find(".test-suite-label");
+        label.text(name);
+
+        var tests = suiteNode.tests;
+        for (let test of tests) {
+            if (id2test[test.id]) {
+                var info = id2test[test.id];
+                var element = info.element;
+                var label = $(element).find(".test-case-label");
+                label.text(test.name);
+                updateTestCaseNodes(test, info);
+            }
+        }
+    }
+
+    /**
+     *  Resize editableList for actions
+     *  @param {string} tabID - target tab id
+     */
+    function resizeActionList(tabID) {
+        if (currentHeight) {
+            $("#"+tabID+"-list").editableList("height", currentHeight);
+        }
+    }
+
+    /**
+     *  Handle resize event of node dialog 
+     *  @param {Object} opt - dialog resize options
+     */
+    function handleNodeDialogResize(opt) {
+        var node = opt.node;
+        if ((node.category === "config") &&
+            (node.type !== "flow-test-config")) {
+            return;
+        }
+        var newHeight = opt.size.height -250;
+        if (node.type === "flow-test-config") {
+            $("#node-test-event-tab-setup-list").editableList("height", newHeight);
+            $("#node-test-event-tab-cleanup-list").editableList("height", newHeight);
+        }
+        else {
+            $("#node-test-event-tab-recv-list").editableList("height", newHeight);
+            $("#node-test-event-tab-stub-list").editableList("height", newHeight);
+            $("#node-test-event-tab-send-list").editableList("height", newHeight);
+        }
+        currentHeight = newHeight;
+    }
+
+    /**
+     *  Get value of typedInput field
+     *  @param {Object} item - typedInput DOM element
+     */
+    function typedInputValue(item) {
+        var val = item.typedInput("value");
+        return val;
+    }
+
+    /**
+     *  Find or creates test case definition with specified id
+     *  @param {Object} suiteNode - config node for test suite
+     *  @param {string} tid - test case id
+     *  @param {string} tname - test case name
+     *  @returns {Object} new test case definition
+     */
+    function findTest(suiteNode, tid, tname) {
+        if (tid === "_NEW_") {
+            var test = createNewTest(suiteNode, tname);
+            return test;
+        }
+        else {
+            var tests = suiteNode.tests;
+            var test = tests.find(function (x) { return (x.id === tid); });
+            test.name = tname;
+            return test;
+        }
+    }
+
+    /**
+     *  Save flow test configurations
+     *  @param {Object} node - target node
+     */
+    function saveConfig(node) {
+        var isGlobal = (node.type === "flow-test-config");
+        var suite = null;
+        var events = null;
+        var nid = null;
+        if (isGlobal) {
+            events = ["setup", "cleanup"];
+            nid = "_global_";
+            suite = node;
+            if (!suite) {
+                throw new Error("no global suite node");
+            }
+            var sname = $("#node-input-name").val();
+            suite.name = sname;
+        }
+        else {
+            events = nodeEvents(node);
+            var sid = $("#flow-test-suite").val();
+            suite = RED.nodes.node(sid);
+            nid = node.id;
+            if (!suite) {
+                throw new Error("suite node not found: "+ sid);
+            }
+            var sname = $("#flow-test-name-suite").typedInput("value");
+            suite.name = sname;
+        }
+
+        var tid = $("#flow-test-test").val();
+        var tname = $("#flow-test-name-test").typedInput("value");
+        var test = (tname !== "") ?  findTest(suite, tid, tname) : null;
+
+        if (test) {
+            test.timeout = $("#flow-test-timeout").typedInput("value");
+            test.max_actions = $("#flow-test-max-actions").typedInput("value");
+
+            var actions = test.actions;
+            for (let event of events) {
+                var listID = "node-test-event-tab-" +event +"-list";
+                var list = $("#"+listID).editableList("items");
+                var acts = [];
+                list.each(function (i) {
+                    var kind = $(this).find(".action-kind").val();
+                    var action = {
+                        kind: kind
+                    };
+                    switch (kind) {
+                    case "send":
+                        var target = $(this).find(".action-send-target").val();
+                        var value = typedInputValue($(this).find(".action-value"));
+                        action.target = target;
+                        action.value = value;
+                        break;
+                    case "click":
+                        var target = $(this).find(".action-click-target").val();
+                        action.target = target;
+                        break;
+                    case "set":
+                        var dst = $(this).find(".action-var");
+                        var src = $(this).find(".action-value-set");
+                        action.dst = {
+                            type: dst.typedInput("type"),
+                            value: dst.typedInput("value"),
+                        };
+                        action.src = {
+                            type: src.typedInput("type"),
+                            value: src.typedInput("value"),
+                        };
+                        break;
+                    case "match":
+                        var value = typedInputValue($(this).find(".action-value"));
+                        action.value = value;
+                        action.performCheck = true;
+                        break;
+                    case "wait":
+                        var wait = $(this).find(".action-wait-ms").typedInput("value");
+                        action.wait = wait;
+                        break;
+                    case "log":
+                        var value = typedInputValue($(this).find(".action-value"));
+                        action.value = value;
+                        break;
+                    case "function":
+                        var code = $(this).find(".action-js").typedInput("value");
+                        var check = $(this).find(".action-js-perform-check").prop("checked");
+                        action.code = code;
+                        action.performCheck = check;
+                        break;
+                    default:
+                        var addon = findAddonAction(kind);
+                        if (addon) {
+                            var onSave = addon.onSave;
+                            if (onSave) {
+                                action = onSave($(this));
+                                action.kind = kind;
+                            }
+                        }
+                        else {
+                            throw new Error("unexpected kind of action: " +kind);
+                        }
+                        break;
+                    }
+                    acts.push(action);
+                });
+                actions[event][nid] = acts;
+            }
+        }
+        RED.nodes.dirty(suite);
+        updateSidebar(suite);
+    }
+
+    function updateSidebarAll() {
+        for (var suite of suites) {
+            var node = suite.node;
+            updateSidebar(node);
+        }
+    }
+
+    /**
+     *  Handle node settings save event
+     *  @param {Object} node - target ndoe
+     */
+    function handleNodeSave(node) {
+        if (node._def.category === "config") {
+            if (node.type !== "flow-test-config") {
+                // nothing to do for other config node
+                return;
+            }
+        }
+        saveConfig(node);
+    }
+
+    /**
+     *  Handle node add event
+     *  @param {Object} node - target node
+     */
+    function handleNodeAdd(node) {
+        if (node.type === "flow-test-config") {
+            addTestSuite(treeRoot, node);
+        }
+        else {
+            updateSidebarAll();
+        }
+    }
+
+    /*
+     *  Handle node remove event
+     *  @param {Object} node - target node
+     */
+    function handleNodeRemove(node) {
+        if (node.type === "flow-test-config") {
+            removeTestSuite(node.id);
+        }
+    }
+
+    /*
+     *  Handle node change event
+     *  @param {Object} node - target node
+     */
+    function handleNodeChange(node) {
+        if (node.type === "flow-test-config") {
+        }
+    }
+
+    //  Internal API for adding log
+    RED.comms.subscribe("flow-test:log", function (type, msg) {
+        addLog("- "+msg);
+    });
+
+    //  Internal API for showing notification
+    RED.comms.subscribe("flow-test:notify", function (type, msg) {
+        addLog("- "+msg);
+        RED.notify(msg);
+    });
+    
+    //  Internal API for handling overflow of actions execution count 
+    RED.comms.subscribe("flow-test:maxActions", function (type, opt) {
+        var msg = `"Exceeded max actions count: ${MAX_ACTIONS}`;
+        addLog("- "+msg);
+        invokeAction("cleanup").then(function () {
+            workComplete();
+        });
+    });
+
+    //  Clear results of match actions
+    RED.comms.subscribe("flow-test:clear-match-result", function (type, opt) {
+        numberOfChecks = countNumberOfChecks(actions);
+        clearMatchResults();
+    });
+
+    //  Handle results of match actions
+    RED.comms.subscribe("flow-test:match-result", function (type, opt) {
+        if (opt.result) {
+            testResult.success++;
+        }
+        else {
+            testResult.fail++;
+            var msg = "test failed";
+            addLog("  - " +msg);
+            RED.notify(msg);
+        }
+        addLog(`- match: ${testResult.success}/${numberOfChecks}`);
+        if ((testResult.success +testResult.fail) === numberOfChecks) {
+            if (currentTimeout) {
+                clearTimeout(currentTimeout);
+                currentTimeout = null;
+            }
+            if (testResult.success) {
+                addLog("- successfully completed.");
+                RED.notify("Flow Test Successfully Completed");
+            }
+            invokeAction("cleanup").then(function () {
+                workComplete();
+            });
+        }
+    });
+
+    // Click button of target node
+    RED.comms.subscribe("flow-test:click", function (type, id) {
+        var node = RED.nodes.node(id);
+        RED.view.clickNodeButton(node);
+    });
+
+    function registerAddon(addon) {
+        addonList.push(addon);
+    }
+
+    // Register flow testing plugin
     RED.plugins.registerPlugin("node-red-flow-tester", {
         onadd: function() {
+            var plugins = RED.plugins.getPluginsByType('flow-tester-addon');
+            plugins.forEach(function(plugin) {
+                registerAddon(plugin);
+            })
+            RED.events.on("registry:plugin-added", function (id) {
+                var plugin = RED.plugins.getPlugin(id);
+                if (plugin.type === "flow-tester-addon") {
+                    registerAddon(plugin);
+                }
+            });
 
-            var content = $("<div>").addClass("red-ui-flow-tester");
-            var toolbar = $('<div></div>');
+            var content = $("<div/>").addClass("red-ui-flow-tester");
+            var toolbar = $('<div/>');
 
+            createSidebarContent(content);
+            
             RED.sidebar.addTab({
                 id: "flow-tester",
                 label: RED._("node-red-flow-tester/flow-tester:label.flowTesterShort"),
@@ -20,12 +1932,28 @@
                 content: content,
                 toolbar: toolbar,
                 enableOnEdit: true,
-                action: "core:show-flow-tester-tab"
+                action: "core:show-flow-tester-tab",
+                onchange: function () {
+                    resizeStack()
+                }
             });
 
-
-            RED.actions.add("flow-tester:show-flow-tester-tab",show);
+            RED.events.on("nodes:add", handleNodeAdd);
+            RED.events.on("nodes:remove", handleNodeRemove);
+            RED.events.on("nodes:change", handleNodeChange);
+            
+            RED.events.on("nodes:dialog-prepare", handleNodeDialogPrepare);
+            RED.events.on("nodes:dialog-resize", handleNodeDialogResize);
+            RED.events.on("editor:save", handleNodeSave);
+            
+            RED.actions.add("flow-tester:show-flow-tester-tab", show);
+        },
+        onremove: function() {
         }
     });
+
+    $(window).on("resize", resizeStack);
+    $(window).on("focus", resizeStack);
+
 })();
 </script>

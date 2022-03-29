@@ -3,5 +3,21 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    background: red;
 }
+
+.red-ui-suite-label {
+}
+
+.red-ui-suite-label-control {
+    position: absolute;
+    top: 0px;
+    right: 0px;
+    margin-top: 5px;
+    margin-right: 5px;
+    display: none;
+}
+
+.red-ui-suite-label:hover .red-ui-suite-label-control {
+    display: inline;
+}
+

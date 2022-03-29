@@ -1,0 +1,46 @@
+<!--
+     UI and related operations are defined in flow tester
+-->
+
+<script type="text/html" data-template-name="flow-test-config">
+
+    <div class="form-row">
+        <label for="node-input-name"><span data-i18n="node-red:common.label.name"></span></label>
+        <input type="text" id="node-input-name"/>
+    </div>
+
+    <div class="form-row" id="test-actions-row">
+        <div id="test-actions-container"></div>
+    </div>
+
+</script>
+
+<script type="text/javascript">
+(function () {
+    RED.nodes.registerType("flow-test-config", {
+        category: "config",		// category of node
+        defaults: {
+            name: { value: "" },
+            tests: { value: [] },
+            currentTest: { value: null },
+        },
+        label: function() {
+            return this.name || "flow test";
+        },
+        labelStyle: function() {
+            return this.name ? "node_label_italic" : "";
+        },
+        oneditprepare: function() {
+            var node = this;
+        },
+        oneditsave: function() {
+            var node = this;
+        },
+        oneditresize: function(size) {
+            var node = this;
+        }
+    });
+
+})();
+
+</script>
